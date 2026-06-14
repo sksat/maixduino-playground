@@ -5,7 +5,7 @@
 
 ## 1. riscv-rt 0.8 の `link.x` を今の rust-lld が拒否する
 
-正典の [`riscv-rust/k210-example`](https://github.com/riscv-rust/k210-example) は
+定番の [`riscv-rust/k210-example`](https://github.com/riscv-rust/k210-example) は
 `riscv-rt = "0.8.0"` を固定している。その生成 linker script にはこうある:
 
 ```
@@ -19,7 +19,7 @@ rust-lld: error: .../riscv-rt-*/out/link.x:58: expected filename pattern
 >>>     (*(.trap));
 ```
 
-あの example が当時リンクできたのは、~2021 年の rust-lld が緩かったから。
+この example が当時リンクできたのは、~2021 年の rust-lld が緩かったから。
 
 **対処:** `riscv-rt = "0.11"` に上げる（その `link.x` は LLD クリーン）。`riscv` クレートは
 直接使っていないので `[dependencies]` から外す。
@@ -88,7 +88,7 @@ SECTIONS
 ```
 
 リンク行が `-Tmemory.x -Tlink.x` なので、2つの `SECTIONS` コマンドは**1つに連結**され、
-`/DISCARD/` が honor される（`INSERT` overlay とは違う）。これで ELF はリンクが通り、
+`/DISCARD/` が効く（`INSERT` overlay とは違う）。これで ELF はリンクが通り、
 `.eh_frame` は消え、エントリは `0x80000000` になる。
 
 ## 最終的に repo に入っているもの
@@ -98,6 +98,6 @@ SECTIONS
 - `.eh_frame` は `memory.x` で破棄
 - デフォルトの `rust-lld` でリンク —— **GNU binutils のインストール不要**
 
-（もし GNU `ld` を使いたくなったら —— 例えば正典の riscv-rt 0.8 をそのまま使う等 ——
+（もし GNU `ld` を使いたくなったら —— 例えば riscv-rt 0.8 をそのまま使う等 ——
 `riscv64-elf-binutils` は Arch 公式 `extra` にある。今回は repo 内/インストール不要を
 保つため避けた。）

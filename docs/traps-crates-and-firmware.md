@@ -15,7 +15,7 @@ error[E0061]: this method takes 3 arguments but 2 arguments were supplied   (con
 
 **本来の** API —— `SYSCTL.constrain()`・`FPIOA.split()`・`into_function()`、そして
 `gpio`/`gpiohs`/`spi`/`dmac`/`fft`/`aes`/`sha256`/`apu` のモジュール —— は
-**git `master`** に*同じ*バージョン番号 `0.2.0` のまま存在し、再公開されていない。正典の
+**git `master`** に*同じ*バージョン番号 `0.2.0` のまま存在し、再公開されていない。定番の
 `k210-example` の `Cargo.toml` も `0.2.0` と書いてあるのにコードは master の API を使う
 —— つまりあれも crates.io ではなく git に対してビルドしている。
 
