@@ -3,15 +3,20 @@
 データシートに載っているスペックではなく、コードを書くときに必要で*すぐには分からない*
 配線・落とし穴だけ。
 
-## オンボード LED
+## オンボード RGB LED（点灯は未決着）
 
-**赤 LED が K210 `IO6`、active-low**（Low で点灯）。実機の総当たりで特定した
-（経緯は [finding-the-led.md](finding-the-led.md)）。Web によくある「IO13/12/14」は
-*Arduino* ピン番号で K210 IO ではない（チップ IO13/12/14 も Arduino map 変換後の
-IO3/10/31 も無反応）。IO6 の FPIOA デフォルトは `RESV0`（未割当のフリーピン）。
+回路図/データシート（[hardware/](../hardware/)、セル単位で確認）では
+**RGB LED = K210 IO13(赤) / IO12(緑) / IO14(青)、active-low**、各 4.7K/10K 直列。
+ただし**実機で点灯を確認できていない**（~0.3mA で極端に暗い等、詳細と全迷走は
+[finding-the-led.md](finding-the-led.md)）。
 
-K210 は FPIOA で任意 IO を任意ペリフェラルに繋げるので、`IO6 -> GPIOHS0` に mux して
-GPIOHS チャネル 0 を駆動する（GPIOHS は AHB クロックで常時稼働、クロック設定不要）。
+注意:
+- **IO6 は LED ではなく `ESP32_U0TX`**（K210↔ESP32 の UART 線）。叩くと ESP32 の活動 LED が
+  反応するので、LED と誤認しやすい。
+- IO13/12/14 はカメラ DVP 信号と共有（IO13=DVP_HSYNC）だが、点灯しない件にカメラは無関係
+  だった。
+- Arduino core の `LED_RED=13` は Arduino ピン番号 → K210 IO3(=JTAG_TDO) を指すバグ。
+  赤 LED を Arduino で叩くなら `digitalWrite(9, ...)`（= K210 IO13）。
 
 ## USB シリアル
 
