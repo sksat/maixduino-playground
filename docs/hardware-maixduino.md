@@ -3,18 +3,24 @@
 データシートに載っているスペックではなく、コードを書くときに必要で*すぐには分からない*
 配線・落とし穴だけ。
 
-## オンボード RGB LED（点灯は未決着）
+## LED（[hardware/](../hardware/) の回路図で確定）
 
-回路図/データシート（[hardware/](../hardware/)、セル単位で確認）では
-**RGB LED = K210 IO13(赤) / IO12(緑) / IO14(青)、active-low**、各 4.7K/10K 直列。
-ただし**実機で点灯を確認できていない**（~0.3mA で極端に暗い等、詳細と全迷走は
-[finding-the-led.md](finding-the-led.md)）。
+**RGB ユーザ LED（LED_1615）= common-anode → +3V3、active-low**:
+
+| 色 | K210 IO | 直列抵抗 |
+|----|---------|----------|
+| 赤 | IO13 | R31 4.7K |
+| 緑 | IO12 | R32 10K |
+| 青 | IO14 | R41 4.7K |
+
+回路は正しい（3V3 → LED → 抵抗 → IO、IO を Low で点灯）。だが 4.7K で ~0.3mA と極端に暗く、
+**実機で点灯を確認できていない**（暗すぎか個体死。詳細と全迷走は [finding-the-led.md](finding-the-led.md)）。
+
+一方 **IO6（= `ESP32_U0TX` 線の活動 LED, 510R, ~3mA で明るい）は Rust でも MaixPy でも点滅する**。
+これがユーザ LED と紛らわしいが、GPIO 制御自体は両スタックで動くことの確かな証拠。
 
 注意:
-- **IO6 は LED ではなく `ESP32_U0TX`**（K210↔ESP32 の UART 線）。叩くと ESP32 の活動 LED が
-  反応するので、LED と誤認しやすい。
-- IO13/12/14 はカメラ DVP 信号と共有（IO13=DVP_HSYNC）だが、点灯しない件にカメラは無関係
-  だった。
+- IO13/12/14 はカメラ DVP 信号と共有（IO13=DVP_HSYNC）だが、点灯しない件にカメラは無関係。
 - Arduino core の `LED_RED=13` は Arduino ピン番号 → K210 IO3(=JTAG_TDO) を指すバグ。
   赤 LED を Arduino で叩くなら `digitalWrite(9, ...)`（= K210 IO13）。
 
