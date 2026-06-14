@@ -5,16 +5,13 @@
 
 ## オンボード LED
 
-3つ、すべて**アクティブLow**（ピンを **Low** に駆動すると点灯）:
+**赤 LED が K210 `IO6`、active-low**（Low で点灯）。実機の総当たりで特定した
+（経緯は [finding-the-led.md](finding-the-led.md)）。Web によくある「IO13/12/14」は
+*Arduino* ピン番号で K210 IO ではない（チップ IO13/12/14 も Arduino map 変換後の
+IO3/10/31 も無反応）。IO6 の FPIOA デフォルトは `RESV0`（未割当のフリーピン）。
 
-| 色   | K210 IO |
-|------|---------|
-| 赤   | IO13    |
-| 緑   | IO12    |
-| 青   | IO14    |
-
-本プロジェクトは**赤**を点滅させる。K210 では FPIOA により任意の IO を任意のペリフェラルに
-ルーティングできるので、`IO13 -> GPIOHS0` に mux して GPIOHS チャネル 0 を駆動する。
+K210 は FPIOA で任意 IO を任意ペリフェラルに繋げるので、`IO6 -> GPIOHS0` に mux して
+GPIOHS チャネル 0 を駆動する（GPIOHS は AHB クロックで常時稼働、クロック設定不要）。
 
 ## USB シリアル
 
