@@ -1,0 +1,29 @@
+[package]
+name = "maixduino-test"
+version = "0.1.0"
+edition = "2021"
+description = "Bare-metal Rust on the Maixduino (Kendryte K210): serial hello + LED blink"
+
+[dependencies]
+# Versions matching the canonical riscv-rust/k210-example. NOTE: the crates.io
+# k210-hal 0.2.0 is an ancient, stripped-down snapshot (no GPIO/sysctl); the real
+# API (constrain/fpioa.split/into_function/...) lives on git master, so we pull
+# k210-hal from git. Cargo.lock pins the exact commit for reproducibility.
+panic-halt = "0.2.0"
+# riscv-rt 0.8's link.x uses `(*(.trap))`, which GNU ld accepts but modern
+# rust-lld rejects. 0.11+ ships an LLD-clean link.x. (We don't use the `riscv`
+# crate directly, so it's not a dependency.)
+riscv-rt = "0.11"
+k210-hal = { git = "https://github.com/riscv-rust/k210-hal" }
+# Tx<UARTHS> implements embedded_io::Write; we need the trait in scope for write_all.
+embedded-io = "0.6"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+codegen-units = 1
+debug = true

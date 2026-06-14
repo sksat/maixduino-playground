@@ -1,0 +1,9 @@
+# Rust
+/target
+
+# build artifacts
+*.bin
+
+# uv / Python
+.venv/
+__pycache__/

@@ -1,0 +1,17 @@
+# The K210 hardware is RV64IMAFDC (= RV64GC) and *does* have an FPU. But the
+# k210-hal stack pulls an old `riscv` crate that ships soft-float (lp64) prebuilt
+# assembly, and rust-lld refuses to mix float ABIs. So we build soft-float
+# `riscv64imac` (lp64) to match that ABI. Our code is integer-only, so not using
+# the FPU costs us nothing here. The linker pulls in our `memory.x`, then `link.x`.
+[build]
+target = "riscv64imac-unknown-none-elf"
+
+[target.riscv64imac-unknown-none-elf]
+# `cargo run` -> objcopy to .bin -> flash with the in-repo-pinned kflash.
+runner = "./flash.sh"
+rustflags = [
+  # memory.x (our MEMORY + a /DISCARD/ for .eh_frame) is concatenated ahead of
+  # riscv-rt's link.x into a single SECTIONS, so the discard actually takes.
+  "-C", "link-arg=-Tmemory.x",
+  "-C", "link-arg=-Tlink.x",
+]
