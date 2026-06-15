@@ -2,12 +2,14 @@
 
 **Sipeed Maixduino**（Kendryte K210）でベアメタル **Rust**。最初の「動いた」を2つ同時にやる:
 
-`src/main.rs` は現在 **CLINT マシンタイマ(`mtime`) のデモ**:
+ペリフェラルを1個ずつ触っていく実験リポジトリ。`src/main.rs` がその時の題材
+（過去のは git 履歴に。シリアル出力は全デモ共通で UARTHS 115200）。
 
-1. USB シリアル（UARTHS, 115200 baud）に出力する
-2. `mtime` で**正確な 1Hz** の IO6 LED 点滅 + 経過秒数をシリアル出力。
-   `mtime` の周波数は不明なので **UART のボーレートで自己校正**する
-   （実機で `mtime_hz=7799258` ≈ K210 CPU/50 ＝ ブート時 CPU ~390MHz と判明）。
+- **SHA256 HW アクセラレータ**（現 `src/main.rs`）: k210-hal は `todo!()` スタブなので
+  PAC 直叩きで実装。`SHA256("abc")` をハードで計算 → 既知値 `ba7816bf...` と照合し
+  シリアルに `PASS`。K210 の癖: 結果は語順逆＋バイトスワップ、`en` が done で落ちない。
+- **CLINT `mtime` タイマ**（コミット `69cfde6`）: nop ループをやめて `mtime` で正確な 1Hz。
+  周波数を UART ボーレートで自己校正 → `mtime_hz=7799258` ≈ CPU/50 ＝ ブート時 CPU ~390MHz。
 
 > オンボード RGB LED(IO13) を光らせようとして大迷走した記録は
 > [docs/finding-the-led.md](docs/finding-the-led.md)（結論: GPIO 制御は動くが、IO13 の

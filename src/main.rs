@@ -1,14 +1,16 @@
-//! Hardware timer demo on the K210: use the RISC-V CLINT machine timer `mtime`
-//! for real timing instead of a nop loop.
+//! K210 hardware SHA256 accelerator demo. k210-hal's `sha256` module is a
+//! `todo!()` stub, so this drives the peripheral directly via the PAC: set the
+//! padded-block count, feed the software-padded message as little-endian u32
+//! words into `data_in` (polling `fifo_in_full`), then read the 8 result words.
 //!
-//! Twist: we don't know mtime's tick rate up front (it depends on the boot
-//! clock), so we *self-calibrate* it against the UART: sending N bytes at a
-//! known 115200 baud takes a known wall-clock time, so the mtime delta over that
-//! send gives mtime_hz. Then we blink IO6 at a precise 1 Hz off mtime and print
-//! the elapsed seconds -- all verifiable against the host clock on the serial.
+//! Two K210 quirks found the hard way:
+//!   - the result comes out word-reversed AND byte-swapped, so
+//!     `digest_word[i] = result[7-i]` read little-endian (`to_le_bytes`);
+//!   - `function_reg_0.en` doesn't reliably clear on done, so we just give the
+//!     block a moment and read (the hash is ready right after feeding).
 //!
-//! (IO6's red LED is the one that actually lights on this board; the documented
-//! RGB LED on IO13 stays dark -- see docs/finding-the-led.md.)
+//! Unambiguous: SHA256("abc") is computed in hardware and checked against the
+//! known vector ba7816bf...20015ad -> PASS/FAIL over serial.
 
 #![no_std]
 #![no_main]
@@ -20,9 +22,7 @@ use k210_hal::pac;
 use k210_hal::prelude::*;
 use riscv_rt::entry;
 
-const UARTHS_TXDATA: *mut u32 = 0x3800_0000 as *mut u32; // bit31 = FIFO full
-const MTIME_LO: *const u32 = 0x0200_BFF8 as *const u32; // CLINT mtime (64-bit)
-const MTIME_HI: *const u32 = 0x0200_BFFC as *const u32;
+const UARTHS_TXDATA: *mut u32 = 0x3800_0000 as *mut u32;
 
 fn putc(c: u8) {
     unsafe {
@@ -35,28 +35,63 @@ fn puts(s: &[u8]) {
         putc(c);
     }
 }
-fn put_u64(mut n: u64) {
-    if n == 0 {
-        putc(b'0');
-        return;
-    }
-    let mut buf = [0u8; 20];
-    let mut i = buf.len();
-    while n > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    puts(&buf[i..]);
+fn put_hex_byte(b: u8) {
+    let h = b"0123456789abcdef";
+    putc(h[(b >> 4) as usize]);
+    putc(h[(b & 0xf) as usize]);
 }
-fn mtime() -> u64 {
+fn delay(n: u32) {
+    for _ in 0..n {
+        unsafe { core::arch::asm!("nop") };
+    }
+}
+
+/// SHA256 of `input` via the K210 hardware accelerator (output = 32 bytes).
+fn sha256_hard(input: &[u8], out: &mut [u8; 32]) {
+    let sha = pac::SHA256::ptr();
     unsafe {
-        loop {
-            let hi = core::ptr::read_volatile(MTIME_HI);
-            let lo = core::ptr::read_volatile(MTIME_LO);
-            if core::ptr::read_volatile(MTIME_HI) == hi {
-                return ((hi as u64) << 32) | lo as u64;
+        let sc = pac::SYSCTL::ptr();
+        (*sc).clk_en_peri.modify(|_, w| w.sha_clk_en().set_bit());
+        (*sc).peri_reset.modify(|_, w| w.sha_reset().set_bit());
+        (*sc).peri_reset.modify(|_, w| w.sha_reset().clear_bit());
+
+        let blocks = ((input.len() + 64 + 8) / 64) as u16; // 512-bit blocks incl. padding
+        let total = blocks as usize * 64;
+
+        (*sha).num_reg.write(|w| w.data_cnt().bits(blocks));
+        (*sha).function_reg_1.modify(|_, w| w.dma_en().clear_bit());
+        (*sha)
+            .function_reg_0
+            .modify(|_, w| w.endian().set_bit().en().set_bit());
+
+        // SHA padding done in software: msg + 0x80 + zeros + 64-bit big-endian length.
+        let lenb = ((input.len() as u64) * 8).to_be_bytes();
+        let byte_at = |idx: usize| -> u8 {
+            if idx < input.len() {
+                input[idx]
+            } else if idx == input.len() {
+                0x80
+            } else if idx >= total - 8 {
+                lenb[idx - (total - 8)]
+            } else {
+                0
             }
+        };
+        for i in 0..(total / 4) {
+            let word = u32::from_le_bytes([
+                byte_at(i * 4),
+                byte_at(i * 4 + 1),
+                byte_at(i * 4 + 2),
+                byte_at(i * 4 + 3),
+            ]);
+            while (*sha).function_reg_1.read().fifo_in_full().bit_is_set() {}
+            (*sha).data_in.write(|w| w.bits(word));
+        }
+
+        delay(100_000); // let the last block finish
+        for i in 0..8 {
+            // word-reversed + byte-swapped: out word i = result[7-i], little-endian
+            out[i * 4..i * 4 + 4].copy_from_slice(&(*sha).result[7 - i].read().bits().to_le_bytes());
         }
     }
 }
@@ -67,52 +102,35 @@ fn main() -> ! {
     let mut sysctl = p.SYSCTL.constrain();
     let fpioa = p.FPIOA.split(&mut sysctl.apb0);
     let _tx = fpioa.io5.into_function(fpioa::UARTHS_TX);
-    let _led = fpioa.io6.into_function(fpioa::GPIOHS0);
-
     let clocks = k210_hal::clock::Clocks::new();
-    let _serial = p.UARTHS.configure(115_200.bps(), &clocks); // sets the baud divisor
+    let _serial = p.UARTHS.configure(115_200.bps(), &clocks);
 
-    let gpiohs = p.GPIOHS;
-    gpiohs.output_en.modify(|r, w| unsafe { w.bits(r.bits() | 1) });
-    gpiohs.input_en.modify(|r, w| unsafe { w.bits(r.bits() & !1) });
+    let want: [u8; 32] = [
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22,
+        0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00,
+        0x15, 0xad,
+    ];
+    let mut digest = [0u8; 32];
+    sha256_hard(b"abc", &mut digest);
+    let pass = digest == want;
 
-    puts(b"\r\n-- K210 CLINT mtime timer demo --\r\n");
-
-    // Calibrate mtime_hz: sending N bytes at 115200 (10 bits/byte) takes
-    // N/11520 seconds; mtime_hz = delta_ticks * 11520 / N.
-    let n: u64 = 2000;
-    let t0 = mtime();
-    for _ in 0..n {
-        putc(b'.');
+    puts(b"\r\n-- K210 hardware SHA256 --\r\n");
+    puts(b"SHA256(\"abc\") = ");
+    for &b in digest.iter() {
+        put_hex_byte(b);
     }
-    let dt = mtime() - t0;
-    let mtime_hz = dt * 11520 / n;
-    puts(b"\r\nmtime_hz=");
-    put_u64(mtime_hz);
+    puts(b"\r\nexpected      = ");
+    for &b in want.iter() {
+        put_hex_byte(b);
+    }
     puts(b"\r\n");
 
-    // Precise 1 Hz blink off mtime; print elapsed whole seconds.
-    let half = mtime_hz / 2;
-    let start = mtime();
-    let mut next = start + half;
-    let mut on = true;
-    let mut tick: u64 = 0;
     loop {
-        while mtime() < next {}
-        next += half;
-        if on {
-            gpiohs.output_val.modify(|r, w| unsafe { w.bits(r.bits() & !1) });
-        } else {
-            gpiohs.output_val.modify(|r, w| unsafe { w.bits(r.bits() | 1) });
+        puts(b"SHA256(abc)=");
+        for &b in digest.iter() {
+            put_hex_byte(b);
         }
-        on = !on;
-        tick += 1;
-        if tick % 2 == 0 {
-            puts(b"t=");
-            put_u64((mtime() - start) / mtime_hz);
-            puts(b"s hz=");
-            put_u64(mtime_hz);
-            puts(b"\r\n");
-        }
+        puts(if pass { b" PASS\r\n" } else { b" FAIL\r\n" });
+        delay(20_000_000);
     }
 }
