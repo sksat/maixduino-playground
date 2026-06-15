@@ -299,3 +299,66 @@ pub fn ov2640_jpeg_uxga(dvp: &Dvp) {
         dvp.sccb_send(OV2640_ADDR, reg, val);
     }
 }
+
+/// Delta to bump the OV2640 from the baseline 320x240 RGB565 (`OV2640_CONFIG`) up
+/// to VGA 640x480, still RGB565. Apply *after* `ov2640_init`. This is the ArduCAM
+/// `640x480_JPEG` window+scaler block (sensor readout window 0x17/0x18/0x19/0x1a/
+/// 0x32, DSP scaler 0xc0/0xc1/0x50-0x5c, PCLK divider 0xd3) but with the final
+/// output format kept as RGB565 (0xda=0x08) instead of JPEG (0xda=0x10). The whole
+/// window/scaler/PCLK set has to move together — overriding only the out-size regs
+/// (0x5a/0x5b) leaves an inconsistent DSP timing config and the frame never
+/// finishes. (Derived with smart-friend/codex.)
+static OV2640_RGB565_VGA_DELTA: &[(u8, u8)] = &[
+    // Sensor bank: VGA readout window + slow pixel clock
+    (0xff, 0x01),
+    (0x11, 0x01), // CLKRC: halve the pixel clock
+    (0x12, 0x00),
+    (0x17, 0x11),
+    (0x18, 0x75),
+    (0x32, 0x36),
+    (0x19, 0x01),
+    (0x1a, 0x97),
+    (0x03, 0x0f),
+    (0x37, 0x40),
+    (0x4f, 0xbb),
+    (0x50, 0x9c),
+    (0x5a, 0x57),
+    (0x6d, 0x80),
+    (0x3d, 0x34),
+    (0x39, 0x02),
+    (0x35, 0x88),
+    (0x22, 0x0a),
+    (0x37, 0x40),
+    (0x34, 0xa0),
+    (0x06, 0x02),
+    (0x0d, 0xb7),
+    (0x0e, 0x01),
+    // DSP bank: VGA scaler/output geometry, RGB565 format
+    (0xff, 0x00),
+    (0xe0, 0x04), // hold/reset DSP while changing scaler regs
+    (0xc0, 0xc8),
+    (0xc1, 0x96),
+    (0x86, 0x3d),
+    (0x50, 0x89),
+    (0x51, 0x90),
+    (0x52, 0x2c),
+    (0x53, 0x00),
+    (0x54, 0x00),
+    (0x55, 0x88),
+    (0x57, 0x00),
+    (0x5a, 0xa0), // OUTW = 640 / 4
+    (0x5b, 0x78), // OUTH = 480 / 4
+    (0x5c, 0x00),
+    (0xd3, 0x04), // DVP PCLK divider (slow; important for VGA RGB565)
+    (0xda, 0x08), // RGB565, NOT JPEG
+    (0xd7, 0x03), // keep the RGB/YUV formatter enabled (as in the working RGB path)
+    (0x05, 0x00), // no bypass
+    (0xe0, 0x00), // release DSP
+];
+
+/// Bump the OV2640 to VGA 640x480 RGB565. Call after `ov2640_init`.
+pub fn ov2640_rgb565_vga(dvp: &Dvp) {
+    for &(reg, val) in OV2640_RGB565_VGA_DELTA {
+        dvp.sccb_send(OV2640_ADDR, reg, val);
+    }
+}

@@ -12,7 +12,7 @@ mod dvp;
 
 use panic_halt as _;
 
-use dvp::{ov2640_init, ov2640_read_id, Dvp, ImageFormat};
+use dvp::{ov2640_init, ov2640_read_id, ov2640_rgb565_vga, Dvp, ImageFormat};
 use k210_hal::fpioa;
 use k210_hal::pac;
 use k210_hal::prelude::*;
@@ -21,8 +21,8 @@ use riscv_rt::entry;
 const UARTHS_TXDATA: *mut u32 = 0x3800_0000 as *mut u32;
 const UNCACHED_OFFSET: usize = 0x4000_0000;
 
-const W: usize = 320;
-const H: usize = 240;
+const W: usize = 640;
+const H: usize = 480;
 const BAUD: u32 = 115_200;
 
 #[repr(C, align(64))]
@@ -100,6 +100,7 @@ fn main() -> ! {
     dvp.init();
     let _ = ov2640_read_id(&dvp);
     ov2640_init(&dvp);
+    ov2640_rgb565_vga(&dvp); // bump 320x240 -> VGA 640x480, still RGB565
     dvp.set_image_format(ImageFormat::RGB);
     dvp.set_image_size(false, W as u16, H as u16);
 
