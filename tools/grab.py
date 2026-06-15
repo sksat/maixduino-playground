@@ -22,9 +22,17 @@ import numpy as np
 import serial
 
 
-def read_frames(port, baud, n, deadline_s):
+# Resolution command bytes understood by the firmware.
+RES_CMD = {"qqvga": b"1", "qvga": b"2", "vga": b"3"}
+
+
+def read_frames(port, baud, n, deadline_s, res=None):
     """Sync on the IMGSTART header and read n full frames. Returns (w, h, list)."""
     s = serial.Serial(port, baud, timeout=5)
+    if res:
+        s.write(RES_CMD[res])  # ask the firmware to switch resolution
+        s.flush()
+        time.sleep(0.5)  # let it reconfigure + warm up before we lock on
     s.reset_input_buffer()  # drop the partial frame we opened in the middle of
     frames, buf = [], b""
     w = h = need = None
@@ -119,12 +127,13 @@ def main():
     ap.add_argument("--baud", type=int, default=1_500_000)
     ap.add_argument("--frames", type=int, default=1, help="N>1 -> temporal median")
     ap.add_argument("--out", default="captures/cam.png")
+    ap.add_argument("--res", choices=list(RES_CMD), help="ask firmware to switch resolution first")
     ap.add_argument("--no-destripe", action="store_true")
     ap.add_argument("--timeout", type=float, default=60.0, help="capture deadline (s)")
     args = ap.parse_args()
 
     t = time.monotonic()
-    w, h, frames = read_frames(args.port, args.baud, args.frames, args.timeout)
+    w, h, frames = read_frames(args.port, args.baud, args.frames, args.timeout, args.res)
     t_cap = time.monotonic() - t
     if not frames:
         print("no frames captured (no IMGSTART header seen)")

@@ -12,7 +12,14 @@
   → XCLK 分周を 3→7 に下げて解決。DVP には**キャッシュ有りアドレス**を渡し CPU は**無しエイリアス
   (0x4000_0000)**で読む。DVP/SCCB ドライバは [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff)
   から移植。
-- **カメラ — VGA 640×480 RGB565 撮影**（現 `src/main.rs`）: クリーン RGB の最大解像度（QVGA の4倍）。
+- **カメラ — 動画ストリーム（解像度ランタイム切替）**（現 `src/main.rs` + [tools/stream.py](tools/stream.py)）:
+  OV2640 のフレームを連続ダンプしてシリアル動画に。**解像度は再フラッシュ不要でホストから切替** ──
+  UARTHS の **RX**（io4）でコマンドバイトを受け、`'1'`=QQVGA 160×120 / `'2'`=QVGA 320×240 / `'3'`=VGA 640×480
+  を `get_image` の合間にポーリングして OV2640+DVP を再構成（フレームバッファは VGA 分を確保し小解像度はその先頭を使用）。
+  ヘッダ `IMGSTART <w> <h>` が現在サイズを運ぶのでホストは自動追従。**fps はシリアル帯域（1.5Mbaud≈120KB/s）で決まる**:
+  QQVGA(38KB)≈**2.4fps** / QVGA(154KB)≈0.8fps / VGA(614KB)≈0.2fps。`tools/stream.py` が数秒録って実 fps を測り
+  **ffmpeg で mp4 化**（DISPLAY 無し環境でも可。ライブ視聴は `ffplay` にパイプ）。本物の動画には WiFi 等の高速転送が要る。
+- **カメラ — VGA 640×480 RGB565 撮影**（コミット `0bebeba`）: クリーン RGB の最大解像度（QVGA の4倍）。
   ハマり所: **出力サイズ(0x5a/0x5b)だけ上書きすると `frame_finish` がハングする** ── センサ読み出し窓
   （0x17/0x18/0x19/0x1a/0x32）・DSP スケーラ（0xc0/0xc1/0x50-0x5c）・PCLK 分周（0xd3）を**全部まとめて**
   動かす必要がある。ArduCAM の `640x480_JPEG` の窓/スケーラ表を流用しつつ、最終フォーマットだけ
