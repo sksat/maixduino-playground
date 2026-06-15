@@ -7,3 +7,6 @@
 # uv / Python
 .venv/
 __pycache__/
+
+# Camera captures (local only, not committed)
+/captures/

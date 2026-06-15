@@ -5,7 +5,14 @@
 ペリフェラルを1個ずつ触っていく実験リポジトリ。`src/main.rs` がその時の題材
 （過去のは git 履歴に。シリアル出力は全デモ共通で UARTHS 115200）。
 
-- **クロック/PLL 読み出し**（現 `src/main.rs`）: sysctl の PLL0/1/2・分周器レジスタをデコードして
+- **カメラ (OV2640/DVP) 撮影**（現 `src/main.rs` + [src/dvp.rs](src/dvp.rs)）: DVP+SCCB ドライバを
+  [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff) から移植。OV2640 を検出
+  （SCCB で `manuf=0x7fa2/product=0x2642`）→ 設定 → RGB565 フレームを DVP（自前 AXI マスタ）で SRAM に
+  取り込み → シリアルにダンプし、ホスト側 `uv run python` で PNG 化（`captures/`、未コミット）。
+  実機で **本物の写真**（320×240、行間相関 0.79）。ハマり所2つ: ① **カメラ FFC の逆挿し**で全 SCCB が
+  0xff（未接続と同症状）、② **PCLK が速すぎてピクセルが水平に化ける** → XCLK 分周を 3→7 に下げて解決。
+  DVP には**キャッシュ有りアドレス**を渡し、CPU は**無しエイリアス(0x4000_0000)**で読む。
+- **クロック/PLL 読み出し**（コミット `6c3723f`）: sysctl の PLL0/1/2・分周器レジスタをデコードして
   実周波数を算出（`PLLn = 26MHz/(clkr+1)*(clkf+1)/(clkod+1)`、`aclk=PLL0/2^(div+1)`）。実機で
   **PLL0=780MHz / CPU(aclk)=390MHz / APB=195MHz**。独立に UART 校正した CLINT mtime（=aclk/50）と
   クロスチェック → `7.80 vs 7.79 MHz, MATCH`。2 つの独立手法で CPU 周波数が裏取りできた。
