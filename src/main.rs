@@ -1,43 +1,30 @@
-//! K210 DVP camera: stream OV2640 RGB565 frames over serial, with the resolution
-//! selectable at runtime from the host (no reflash).
+//! K210 RTC demo: set the wall clock, watch it tick, and cross-check its 1 Hz
+//! against the CLINT machine timer (`mtime`).
 //!
-//! Host -> device: a single ASCII byte picks the resolution and takes effect on
-//! the next frame:
-//!   '1' = QQVGA 160x120   '2' = QVGA 320x240   '3' = VGA 640x480
-//! Device -> host, repeated every frame:
-//!   "IMGSTART <w> <h>\n"  then  w*h*2 raw little-endian RGB565 bytes (buffer order)
-//! The host syncs on the header (which carries the current w/h) and reads exactly
-//! w*h*2 bytes, so it adapts automatically when the resolution changes.
+//! The RTC and `mtime` are independent clocks. `mtime` was calibrated in the
+//! clock demo to ~7.80 MHz (= CPU/50). If the RTC really advances at 1 Hz, then
+//! exactly one `mtime`-second (~7.80M ticks) should elapse between consecutive
+//! RTC second changes — which is what this prints and checks.
 
 #![no_std]
 #![no_main]
 
-mod dvp;
+mod rtc;
 
 use panic_halt as _;
 
-use dvp::{ov2640_init, ov2640_read_id, ov2640_rgb565_qqvga, ov2640_rgb565_vga, Dvp, ImageFormat};
 use k210_hal::fpioa;
 use k210_hal::pac;
 use k210_hal::prelude::*;
 use riscv_rt::entry;
+use rtc::Rtc;
 
 const UARTHS_TXDATA: *mut u32 = 0x3800_0000 as *mut u32;
-const UARTHS_RXDATA: *const u32 = 0x3800_0004 as *const u32;
-const UNCACHED_OFFSET: usize = 0x4000_0000;
+const CLINT_MTIME: *const u64 = 0x0200_BFF8 as *const u64;
+const BAUD: u32 = 115_200;
 
-const BAUD: u32 = 1_500_000;
-
-// Frame buffer sized for the largest supported mode (VGA 640x480 RGB565 = 600 KB);
-// smaller resolutions use a prefix of it.
-const WMAX: usize = 640;
-const HMAX: usize = 480;
-
-#[repr(C, align(64))]
-struct Frame {
-    px: [u32; WMAX * HMAX / 2],
-}
-static mut FRAME: Frame = Frame { px: [0; WMAX * HMAX / 2] };
+/// Expected mtime ticks per real second (from the clock demo: CPU ~390 MHz / 50).
+const MTIME_HZ: u32 = 7_799_258;
 
 fn putc(c: u8) {
     unsafe {
@@ -67,43 +54,20 @@ fn put_dec(mut v: u32) {
         putc(buf[i]);
     }
 }
-/// Non-blocking UARTHS read: `None` if the RX FIFO is empty (bit31 = empty flag).
-fn getc_try() -> Option<u8> {
-    let v = unsafe { core::ptr::read_volatile(UARTHS_RXDATA) };
-    if v & 0x8000_0000 != 0 {
-        None
-    } else {
-        Some((v & 0xff) as u8)
-    }
+/// Two-digit zero-padded (for hh:mm:ss).
+fn put_2(v: u8) {
+    putc(b'0' + (v / 10) % 10);
+    putc(b'0' + v % 10);
 }
-fn delay(n: u32) {
-    for _ in 0..n {
-        unsafe { core::arch::asm!("nop") };
-    }
+fn put_time(h: u8, m: u8, s: u8) {
+    put_2(h);
+    putc(b':');
+    put_2(m);
+    putc(b':');
+    put_2(s);
 }
-
-/// Apply the OV2640 + DVP config for `mode` ('1'/'2'/'3') and return (w, h).
-/// Re-runs the baseline RGB565 init each time so switching between sizes is
-/// order-independent, then layers the size-specific scaler delta on top.
-fn configure_res(dvp: &Dvp, mode: u8) -> (usize, usize) {
-    ov2640_init(dvp);
-    let (w, h) = match mode {
-        b'2' => (320, 240),                              // QVGA: baseline, no delta
-        b'3' => {
-            ov2640_rgb565_vga(dvp);
-            (640, 480)
-        }
-        _ => {
-            ov2640_rgb565_qqvga(dvp);
-            (160, 120)
-        } // '1' (default): QQVGA
-    };
-    dvp.set_image_format(ImageFormat::RGB);
-    dvp.set_image_size(false, w as u16, h as u16);
-    for _ in 0..8 {
-        dvp.get_image(); // warm-up frames at the new size (discard)
-    }
-    (w, h)
+fn mtime() -> u64 {
+    unsafe { core::ptr::read_volatile(CLINT_MTIME) }
 }
 
 #[entry]
@@ -111,81 +75,78 @@ fn main() -> ! {
     let p = pac::Peripherals::take().unwrap();
     let mut sysctl = p.SYSCTL.constrain();
     let fpioa = p.FPIOA.split(&mut sysctl.apb0);
-
     let _tx = fpioa.io5.into_function(fpioa::UARTHS_TX);
-    let _rx = fpioa.io4.into_function(fpioa::UARTHS_RX);
-    let _sda = fpioa.io40.into_function(fpioa::SCCB_SDA);
-    let _scl = fpioa.io41.into_function(fpioa::SCCB_SCLK);
-    let _rst = fpioa.io42.into_function(fpioa::CMOS_RST);
-    let _vsync = fpioa.io43.into_function(fpioa::CMOS_VSYNC);
-    let _pwdn = fpioa.io44.into_function(fpioa::CMOS_PWDN);
-    let _href = fpioa.io45.into_function(fpioa::CMOS_HREF);
-    let _xclk = fpioa.io46.into_function(fpioa::CMOS_XCLK);
-    let _pclk = fpioa.io47.into_function(fpioa::CMOS_PCLK);
 
     let clocks = k210_hal::clock::Clocks::new();
     let _serial = p.UARTHS.configure(BAUD.bps(), &clocks);
 
-    unsafe {
-        let sc = pac::SYSCTL::ptr();
-        (*sc)
-            .power_sel
-            .modify(|_, w| w.power_mode_sel6().clear_bit().power_mode_sel7().clear_bit());
-        // The 8 DVP data lines come in over the SPI0-shared pads, so SPI0 must be
-        // clocked for them to be driven; then route them to the DVP.
-        (*sc).clk_en_cent.modify(|_, w| w.apb2_clk_en().set_bit());
-        (*sc).clk_en_peri.modify(|_, w| w.spi0_clk_en().set_bit());
-        (*sc).misc.modify(|_, w| w.spi_dvp_data_enable().set_bit());
+    let rtc = Rtc::new(p.RTC);
+    rtc.init();
+    rtc.set_datetime(2026, 6, 16, 2, 12, 0, 0); // 2026-06-16 (Tue) 12:00:00
+
+    puts(b"RTC demo: set 2026-06-16 12:00:00\n");
+    let (y, mo, d) = rtc.date();
+    puts(b"date readback: ");
+    put_dec(y as u32);
+    putc(b'-');
+    put_2(mo);
+    putc(b'-');
+    put_2(d);
+    putc(b'\n');
+    puts(b"checking 1 Hz against mtime (expect ~7.80M ticks/RTC-second):\n");
+
+    // Align to a second boundary, then measure several full RTC seconds.
+    let mut prev_s = rtc.time().2;
+    loop {
+        let s = rtc.time().2;
+        if s != prev_s {
+            prev_s = s;
+            break;
+        }
+    }
+    let mut prev_mt = mtime();
+
+    let mut all_ok = true;
+    let mut n = 0;
+    while n < 6 {
+        let (h, m, s) = rtc.time();
+        if s != prev_s {
+            let now = mtime();
+            let dmt = (now - prev_mt) as u32;
+            put_time(h, m, s);
+            puts(b"  d-mtime=");
+            put_dec(dmt);
+            // within 2% of one mtime-second?
+            let diff = if dmt > MTIME_HZ { dmt - MTIME_HZ } else { MTIME_HZ - dmt };
+            let ok = diff < MTIME_HZ / 50;
+            if ok {
+                puts(b"  ok\n");
+            } else {
+                puts(b"  OFF\n");
+                all_ok = false;
+            }
+            prev_s = s;
+            prev_mt = now;
+            n += 1;
+        }
     }
 
-    let dvp = Dvp::new(p.DVP);
-    dvp.init();
-    let _ = ov2640_read_id(&dvp);
+    if all_ok {
+        puts(b"PASS: RTC ticks at 1 Hz (validated by the independent mtime clock)\n");
+    } else {
+        puts(b"FAIL: RTC second != one mtime-second\n");
+    }
 
-    // The DVP's AXI master writes to the cached SRAM address (0x8000_0000 range);
-    // the CPU reads back through the uncached alias (0x4000_0000) so it sees the
-    // DVP's writes instead of stale cache.
-    let cached = unsafe { core::ptr::addr_of!(FRAME.px) } as *const u32 as usize;
-    let buf = (cached - UNCACHED_OFFSET) as *const u32;
-    dvp.set_ai_addr(None);
-    dvp.set_display_addr(Some(cached as u32));
-    dvp.set_auto(false);
-
-    delay(60_000_000); // brief settle; warm-up frames in configure_res do the rest
-    let (mut w, mut h) = configure_res(&dvp, b'1'); // default: QQVGA stream
-
+    // Keep showing the live clock so the stream is observable at any time.
+    puts(b"live clock:\n");
+    let mut prev = prev_s;
     loop {
-        // Drain any pending host bytes; the last valid command wins.
-        let mut cmd = None;
-        while let Some(c) = getc_try() {
-            if matches!(c, b'1' | b'2' | b'3') {
-                cmd = Some(c);
-            }
+        let (h, m, s) = rtc.time();
+        if s != prev {
+            puts(b"  ");
+            put_time(h, m, s);
+            putc(b'\n');
+            prev = s;
         }
-        if let Some(c) = cmd {
-            let (nw, nh) = configure_res(&dvp, c);
-            w = nw;
-            h = nh;
-        }
-
-        dvp.get_image();
-
-        puts(b"IMGSTART ");
-        put_dec(w as u32);
-        putc(b' ');
-        put_dec(h as u32);
-        putc(b'\n');
-        for i in 0..(w * h / 2) {
-            let word = unsafe { core::ptr::read_volatile(buf.add(i)) };
-            putc((word & 0xff) as u8);
-            putc((word >> 8) as u8);
-            putc((word >> 16) as u8);
-            putc((word >> 24) as u8);
-        }
-        puts(b"IMGEND\n");
-        // Minimal inter-frame gap so the host can resync; small because a QQVGA
-        // frame is only ~38 KB (~0.3s at 1.5 Mbaud) and debug-build nop loops are
-        // expensive (a big loop here would dominate the frame time).
-        delay(200_000);
     }
 }

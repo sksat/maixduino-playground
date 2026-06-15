@@ -12,7 +12,13 @@
   → XCLK 分周を 3→7 に下げて解決。DVP には**キャッシュ有りアドレス**を渡し CPU は**無しエイリアス
   (0x4000_0000)**で読む。DVP/SCCB ドライバは [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff)
   から移植。
-- **カメラ — 動画ストリーム（解像度ランタイム切替）**（現 `src/main.rs` + [tools/stream.py](tools/stream.py)）:
+- **RTC（リアルタイムクロック）+ mtime クロスチェック**（現 `src/main.rs` + [src/rtc.rs](src/rtc.rs)）:
+  HAL に `rtc` は無いので PAC 直叩き（kendryte SDK の手順を移植）。壁時計を 2026-06-16 12:00:00 にセットして
+  1Hz で刻ませ、**独立した CLINT `mtime` と突き合わせて 1Hz を裏取り**。RTC は 26MHz クリスタルを
+  `initial_count=26_000_000` で割って 1秒、`register_ctrl` の write/read_enable とマスクで書込/読出を切替。
+  実機で **RTC 1秒 = mtime 約 7,800,000 ティック**（6サンプルのばらつき僅か7ティック、期待 ~7.80M=CPU/50 と一致）→
+  クリスタル由来の RTC と PLL 由来の CPU クロックが 0.01% で一致して相互検証 → `PASS`。
+- **カメラ — 動画ストリーム（解像度ランタイム切替）**（コミット `0cd01a9` + [tools/stream.py](tools/stream.py)）:
   OV2640 のフレームを連続ダンプしてシリアル動画に。**解像度は再フラッシュ不要でホストから切替** ──
   UARTHS の **RX**（io4）でコマンドバイトを受け、`'1'`=QQVGA 160×120 / `'2'`=QVGA 320×240 / `'3'`=VGA 640×480
   を `get_image` の合間にポーリングして OV2640+DVP を再構成（フレームバッファは VGA 分を確保し小解像度はその先頭を使用）。
