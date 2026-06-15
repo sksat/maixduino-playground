@@ -3,7 +3,7 @@
 **Sipeed Maixduino**（Kendryte K210）でベアメタル **Rust**。最初の「動いた」を2つ同時にやる:
 
 ペリフェラルを1個ずつ触っていく実験リポジトリ。`src/main.rs` がその時の題材
-（過去のは git 履歴に。シリアル出力は全デモ共通で UARTHS 115200）。
+（過去のは git 履歴に。シリアル出力は UARTHS、基本 115200／現カメラデモは 1.5Mbaud）。
 
 - **カメラ (OV2640/DVP) — 320×240 RGB565 撮影**（コミット `f107bf9` + [src/dvp.rs](src/dvp.rs)）:
   RGB565 フレームを DVP（自前 AXI マスタ）で SRAM に取り込み → シリアルにダンプ → ホスト `uv run python`
@@ -16,8 +16,11 @@
   ハマり所: **出力サイズ(0x5a/0x5b)だけ上書きすると `frame_finish` がハングする** ── センサ読み出し窓
   （0x17/0x18/0x19/0x1a/0x32）・DSP スケーラ（0xc0/0xc1/0x50-0x5c）・PCLK 分周（0xd3）を**全部まとめて**
   動かす必要がある。ArduCAM の `640x480_JPEG` の窓/スケーラ表を流用しつつ、最終フォーマットだけ
-  JPEG(0xda=0x10)→ RGB565(0xda=0x08) に差し替え（smart-friend/codex と協働で導出）。転送は 115200 で
-  約53秒/枚（614400B）、3枚 temporal median + destripe で約3分のクリーン1枚。
+  JPEG(0xda=0x10)→ RGB565(0xda=0x08) に差し替え（smart-friend/codex と協働で導出）。
+  **シリアルは UARTHS 1.5Mbaud**（614400B が約8秒/枚、115200 比 約7倍）。以前「高ボーレートは化ける」と
+  していたのはホスト側の早すぎる timeout が原因で、1.5M では IMGSTART ヘッダもフレームもバイト単位でクリーン。
+  分周は `cpu/baud-1`（cpu=390MHz 固定）で 1.5M→div 259＝厳密に 390e6/260。2M/3M も厳密分周だが化ける
+  （io5 の信号品質限界、1.5M が上限。kflash の書き込みも同じ UARTHS を 1.5M で使うので実績あり）。
 - **カメラ — UXGA 1600×1200 JPEG 撮影（最大解像度）**（コミット `f5dbb55`）: OV2640 を JPEG/UXGA に設定
   （ArduCAM レジスタ表）、DVP で JPEG バイト列を取り込み、**デバイス上で SOI/EOI(FF D8…FF D9)を探して
   JPEG 部分だけダンプ**（圧縮済み ~150KB）。**正しい UXGA JPEG**（FFD8FFE0…FFD9、上部に実シーン）。

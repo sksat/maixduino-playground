@@ -23,7 +23,7 @@ const UNCACHED_OFFSET: usize = 0x4000_0000;
 
 const W: usize = 640;
 const H: usize = 480;
-const BAUD: u32 = 115_200;
+const BAUD: u32 = 1_500_000;
 
 #[repr(C, align(64))]
 struct Frame {
