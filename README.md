@@ -5,10 +5,15 @@
 ペリフェラルを1個ずつ触っていく実験リポジトリ。`src/main.rs` がその時の題材
 （過去のは git 履歴に。シリアル出力は全デモ共通で UARTHS 115200）。
 
-- **AES-128 ECB HW アクセラレータ**（現 `src/main.rs`）: k210-hal は `todo!()` スタブなので
-  PAC 直叩きで実装。FIPS-197 のテストベクタを暗号化 → 既知の `69c4e0d8...c55a` と照合し
-  シリアルに `PASS`。K210 の癖: `endian` レジスタを**鍵書き込みより先に**立てる（順序依存）、
-  鍵は語順逆の LE、出力は LE。
+- **DMAC メモリ間転送**（現 `src/main.rs` + [src/dmac.rs](src/dmac.rs)）: DesignWare AXI DMA に
+  HAL は無い（k210-hal の `dmac` は 32 行スタブ）ので PAC 直叩き。register sequence は唯一の完動
+  Rust 実装 [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff) から移植し、現行の
+  k210-hal/riscv-rt 0.11 に適合。64 語をコピーして照合 → `PASS`。K210 の癖: SRAM は 0x8000_0000 が
+  キャッシュ有り／0x4000_0000 が無し別名なので、DMA バッファは**無し別名経由**で扱いコヒーレンシを確保。
+  （これは次の FFT デモの土台。**K210 FFT は MMIO データ経路を持たず DMA でしか叩けない**ことが判明したため。）
+- **AES-128 ECB HW アクセラレータ**（コミット `2b4f948`）: PAC 直叩き。FIPS-197 のテストベクタを
+  暗号化 → 既知の `69c4e0d8...c55a` と照合し `PASS`。K210 の癖: `endian` レジスタを**鍵書き込みより
+  先に**立てる（順序依存）、鍵は語順逆の LE、出力は LE。
 - **SHA256 HW アクセラレータ**（コミット `301661d`）: PAC 直叩き。`SHA256("abc")` をハードで
   計算 → 既知値 `ba7816bf...` と照合。K210 の癖: 結果は語順逆＋バイトスワップ、`en` が done で落ちない。
 - **CLINT `mtime` タイマ**（コミット `69cfde6`）: nop ループをやめて `mtime` で正確な 1Hz。
