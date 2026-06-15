@@ -2,10 +2,16 @@
 
 **Sipeed Maixduino**（Kendryte K210）でベアメタル **Rust**。最初の「動いた」を2つ同時にやる:
 
-1. USB シリアル（UARTHS, 115200 baud）に出力する ← **動作確認済み**
-2. オンボードの **RGB 赤 LED**（K210 **IO13**, アクティブLow）を点滅させる
-   ← **駆動はしているが視認できず・未決着**（4.7K で極端に暗い／要テスタ実測）。
-   この LED 特定で大迷走した記録: [docs/finding-the-led.md](docs/finding-the-led.md)
+`src/main.rs` は現在 **CLINT マシンタイマ(`mtime`) のデモ**:
+
+1. USB シリアル（UARTHS, 115200 baud）に出力する
+2. `mtime` で**正確な 1Hz** の IO6 LED 点滅 + 経過秒数をシリアル出力。
+   `mtime` の周波数は不明なので **UART のボーレートで自己校正**する
+   （実機で `mtime_hz=7799258` ≈ K210 CPU/50 ＝ ブート時 CPU ~390MHz と判明）。
+
+> オンボード RGB LED(IO13) を光らせようとして大迷走した記録は
+> [docs/finding-the-led.md](docs/finding-the-led.md)（結論: GPIO 制御は動くが、IO13 の
+> RGB は 4.7K で極暗 or 個体死で視認できず。見える LED は IO6）。
 
 ねらいは、CLI 中心の低レイヤ K210 ツールチェーンをきれいに組むことと、その過程で踏んだ
 [大量のツールチェーン罠](docs/)を書き残すこと。
