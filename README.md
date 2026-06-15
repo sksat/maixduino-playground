@@ -5,12 +5,15 @@
 ペリフェラルを1個ずつ触っていく実験リポジトリ。`src/main.rs` がその時の題材
 （過去のは git 履歴に。シリアル出力は全デモ共通で UARTHS 115200）。
 
-- **FFT HW アクセラレータ（DMA 駆動）**（現 `src/main.rs`）: 実信号トーン
-  `x[n]=10000·cos(2π·8n/64)` を 64 点 FFT → スペクトルが **bin 8（とミラー bin 56）にピーク**、
-  振幅は shift=0x3F の 1/64 正規化どおり 5000、隣接 bin は 0 で `PASS`。
-  **K210 FFT は MMIO データ経路を持たない**（FIFO への CPU 書き込みは握り潰される＝実機確認済み）。
-  TX/RX リクエストのハンドシェイクで **DMA とだけ**やり取りするので、送信(RAM→入力FIFO)・受信
-  (出力FIFO→RAM) の 2 チャネルを同時に回して駆動。
+- **マシンタイマ割り込み (ISR)**（現 `src/main.rs`）: ここまで全部ポーリングだったが、これは
+  割り込み駆動。CPU は `wfi` で寝て、CLINT マシンタイマ ISR が `mtimecmp` 再アーム・tick カウント・
+  IO6(LED) トグルを行う。riscv-rt は mtvec を張るだけなので `mie.MTIE`/`mstatus.MIE` は生 CSR 書き込みで
+  自前で有効化。出力 1 行＝割り込み 1 回なので、ホスト側タイムスタンプの行間が **きっかり 0.500s（2 Hz）**
+  で周期を実証。
+- **FFT HW アクセラレータ（DMA 駆動）**（コミット `1e8b233`）: 実信号トーン
+  `x[n]=10000·cos(2π·8n/64)` を 64 点 FFT → **bin 8（とミラー bin 56）にピーク**、振幅 5000・隣接 0 で `PASS`。
+  **K210 FFT は MMIO データ経路を持たない**（FIFO への CPU 書き込みは握り潰される＝実機確認済み）ので、
+  送信(RAM→入力FIFO)・受信(出力FIFO→RAM) の DMA 2 チャネルを同時に回して駆動。
 - **DMAC ドライバ + メモリ間転送**（[src/dmac.rs](src/dmac.rs), コミット `b713365`）: DesignWare
   AXI DMA に HAL は無い（k210-hal の `dmac` は 32 行スタブ）ので PAC 直叩き。register sequence は唯一の
   完動 Rust 実装 [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff) から移植し、現行の
