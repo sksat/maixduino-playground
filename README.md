@@ -12,13 +12,17 @@
   → XCLK 分周を 3→7 に下げて解決。DVP には**キャッシュ有りアドレス**を渡し CPU は**無しエイリアス
   (0x4000_0000)**で読む。DVP/SCCB ドライバは [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff)
   から移植。
-- **ESP32（オンボード WiFi）リンク確立 — step 1**（現 `src/main.rs`）: K210 とオンボード ESP32-WROOM-32 の
-  疎通確認。配線は UART（**IO6=ESP32_U0TX→K210 RX, IO7=K210 TX→ESP32_U0RX**）と SPI/nina（CS=IO9, SPI0
-  SCLK=IO27/MOSI=IO28, READY=IO25）。**IO8=ESP32_EN** をパルスして ESP32 をリセット → UART1(115200) で
-  **ブートバナーを捕捉**（`ets Jun 8 2016 / POWERON_RESET / SPI_FAST_FLASH_BOOT … entry 0x4008068c`）→
-  ESP32 が生きててフラッシュにファームが居ることを確認。続けて `AT\r\n` を3回投げても**無応答** ＝ esp-at では
-  なく **nina-fw（SPI 版 WiFiNINA）**。よって WiFi は UART AT ではなく **SPI nina プロトコル**で叩く（次ステップ）。
-  ピン配線は [hardware/](hardware/) の回路図/配線表（xlsx）から確定。
+- **ESP32（オンボード WiFi）— nina-fw SPI 疎通 (step 2)**（現 `src/main.rs`）: ESP32 の nina-fw に
+  **SPI で `GET_FW_VERSION`(0x37) を投げてバージョン文字列を取得** → SPI リンク＋プロトコルが端まで動作。
+  実機で `cmd=0xb7(=0x37|0x80) nparams=1 end=0xEE`、**fw version "1.2.2"**、`PASS`。k210-hal の SPI は未完成
+  なので **GPIOHS で SPI を bit-bang**。配線は MaixPy 既定ドライバ準拠で **EN=IO8 / CS=IO25 / READY=IO9 /
+  SCLK=IO27 / MOSI=IO28 / MISO=IO26**（CS と READY が回路図ネット名と逆なのが最大の罠）。他のハマり: ①GPIOHS
+  関数デフォルトはパッドの入力バッファ(ie_en)を立てない→READY/MISO の `ie_en` を明示的に有効化（+pd クリア）、
+  ②nina スレーブは**立ち上がりエッジで MISO を出す**ので SCLK を上げる**前**にサンプル（最初これで1ビットずれた）。
+  ハンドシェイク: READY low=ready、CS low で high(選択/busy)、コマンドと応答は別 CS フレーム。次は接続→ソケット。
+- **ESP32 リンク確立 — step 1（UART でファーム判定）**（コミット `ebe71cc`）: **IO8=ESP32_EN** をパルスして
+  リセット → UART1(IO6/IO7,115200) で **ブートバナーを捕捉**（`ets Jun 8 2016 … SPI_FAST_FLASH_BOOT … entry
+  0x4008068c`）→ ESP32 が生きてファーム在中を確認。`AT\r\n`×3 は**無応答** ＝ esp-at ではなく **nina-fw(SPI)**。
 - **RTC（リアルタイムクロック）+ mtime クロスチェック**（コミット `a82fbd0` + [src/rtc.rs](src/rtc.rs)）:
   HAL に `rtc` は無いので PAC 直叩き（kendryte SDK の手順を移植）。壁時計を 2026-06-16 12:00:00 にセットして
   1Hz で刻ませ、**独立した CLINT `mtime` と突き合わせて 1Hz を裏取り**。RTC は 26MHz クリスタルを
