@@ -1,26 +1,28 @@
-//! K210 clock-tree readout. Decodes the sysctl PLL registers and clock selectors
-//! into real frequencies and prints them, instead of just trusting the boot-ROM
-//! defaults. Cross-checks the decoded CPU clock against the independently
-//! measured CLINT mtime rate (commit 69cfde6 found mtime = aclk/50 = 7.80 MHz).
+//! K210 DVP camera, step 1: bring up the DVP + SCCB bus and read the OV2640
+//! sensor's chip ID over serial. A correct ID (manuf 0x7fa2, product 0x2642)
+//! proves the SCCB bus works and the camera is attached -- the prerequisite for
+//! capturing frames.
 //!
-//! K210 clock tree (26 MHz crystal on IN0):
-//!   PLLn  = IN0 / (clkr+1) * (clkf+1) / (clkod+1)
-//!   aclk  = PLL0 / 2^(aclk_divider_sel+1)   (CPU clock; or IN0 if aclk_sel=0)
-//!   apbN  = aclk / (apbN_clk_sel+1)
+//! Board notes (Maixduino): the camera connector wires the DVP signals to fixed
+//! K210 IOs (40..47), muxed to the CMOS_*/SCCB_* functions. The DVP data pins are
+//! 3.3 V (banks 6 & 7), and the 24-pin camera FFC must be inserted the right way
+//! up -- a reversed cable leaves the sensor unpowered and every SCCB read returns
+//! 0xff (no device ACK), which looks exactly like a missing camera.
 
 #![no_std]
 #![no_main]
 
+mod dvp;
+
 use panic_halt as _;
 
+use dvp::{ov2640_read_id, Dvp};
 use k210_hal::fpioa;
 use k210_hal::pac;
 use k210_hal::prelude::*;
 use riscv_rt::entry;
 
 const UARTHS_TXDATA: *mut u32 = 0x3800_0000 as *mut u32;
-const IN0_HZ: u64 = 26_000_000; // onboard crystal
-const MTIME_HZ_MEASURED: u64 = 7_799_258; // commit 69cfde6, mtime = aclk/50
 
 fn putc(c: u8) {
     unsafe {
@@ -33,33 +35,11 @@ fn puts(s: &[u8]) {
         putc(c);
     }
 }
-fn put_dec(mut v: u32) {
-    if v == 0 {
-        putc(b'0');
-        return;
+fn put_hex16(v: u16) {
+    let h = b"0123456789abcdef";
+    for s in (0..4).rev() {
+        putc(h[((v >> (s * 4)) & 0xf) as usize]);
     }
-    let mut buf = [0u8; 10];
-    let mut i = 0;
-    while v > 0 {
-        buf[i] = b'0' + (v % 10) as u8;
-        v /= 10;
-        i += 1;
-    }
-    while i > 0 {
-        i -= 1;
-        putc(buf[i]);
-    }
-}
-/// Print a frequency in Hz as "DDD.DD MHz".
-fn put_mhz(hz: u64) {
-    put_dec((hz / 1_000_000) as u32);
-    putc(b'.');
-    let frac = (hz % 1_000_000) / 10_000;
-    if frac < 10 {
-        putc(b'0');
-    }
-    put_dec(frac as u32);
-    puts(b" MHz");
 }
 fn delay(n: u32) {
     for _ in 0..n {
@@ -67,71 +47,53 @@ fn delay(n: u32) {
     }
 }
 
-fn pll_freq(r: u8, f: u8, od: u8) -> u64 {
-    IN0_HZ * (f as u64 + 1) / ((r as u64 + 1) * (od as u64 + 1))
-}
-
 #[entry]
 fn main() -> ! {
     let p = pac::Peripherals::take().unwrap();
     let mut sysctl = p.SYSCTL.constrain();
     let fpioa = p.FPIOA.split(&mut sysctl.apb0);
+
+    // Serial.
     let _tx = fpioa.io5.into_function(fpioa::UARTHS_TX);
+    // DVP / camera pins.
+    let _sda = fpioa.io40.into_function(fpioa::SCCB_SDA);
+    let _scl = fpioa.io41.into_function(fpioa::SCCB_SCLK);
+    let _rst = fpioa.io42.into_function(fpioa::CMOS_RST);
+    let _vsync = fpioa.io43.into_function(fpioa::CMOS_VSYNC);
+    let _pwdn = fpioa.io44.into_function(fpioa::CMOS_PWDN);
+    let _href = fpioa.io45.into_function(fpioa::CMOS_HREF);
+    let _xclk = fpioa.io46.into_function(fpioa::CMOS_XCLK);
+    let _pclk = fpioa.io47.into_function(fpioa::CMOS_PCLK);
+
     let clocks = k210_hal::clock::Clocks::new();
     let _serial = p.UARTHS.configure(115_200.bps(), &clocks);
 
-    let sc = unsafe { &*pac::SYSCTL::ptr() };
+    // DVP IO is 3.3 V on the Maixduino (banks 6 & 7); route the DVP data lines.
+    unsafe {
+        let sc = pac::SYSCTL::ptr();
+        (*sc)
+            .power_sel
+            .modify(|_, w| w.power_mode_sel6().clear_bit().power_mode_sel7().clear_bit());
+        (*sc).misc.modify(|_, w| w.spi_dvp_data_enable().set_bit());
+    }
 
+    let dvp = Dvp::new(p.DVP);
+    dvp.init();
+
+    let (manuf, pid) = ov2640_read_id(&dvp);
+    let ok = manuf == 0x7fa2 && pid == 0x2642;
+
+    puts(b"\r\n-- K210 DVP / OV2640 chip ID --\r\n");
     loop {
-        let p0 = sc.pll0.read();
-        let p1 = sc.pll1.read();
-        let p2 = sc.pll2.read();
-        let pll0 = pll_freq(p0.clkr().bits(), p0.clkf().bits(), p0.clkod().bits());
-        let pll1 = pll_freq(p1.clkr().bits(), p1.clkf().bits(), p1.clkod().bits());
-        let pll2 = pll_freq(p2.clkr().bits(), p2.clkf().bits(), p2.clkod().bits());
-
-        let cs = sc.clk_sel0.read();
-        let aclk = if cs.aclk_sel().bit() {
-            pll0 / (2u64 << cs.aclk_divider_sel().bits())
+        puts(b"manuf=0x");
+        put_hex16(manuf);
+        puts(b" product=0x");
+        put_hex16(pid);
+        if ok {
+            puts(b"  -> OV2640 detected, SCCB OK\r\n");
         } else {
-            IN0_HZ
-        };
-        let apb0 = aclk / (cs.apb0_clk_sel().bits() as u64 + 1);
-        let apb1 = aclk / (cs.apb1_clk_sel().bits() as u64 + 1);
-        let apb2 = aclk / (cs.apb2_clk_sel().bits() as u64 + 1);
-
-        puts(b"\r\n-- K210 clock tree (IN0 = 26.00 MHz) --\r\n");
-        puts(b"PLL0 = ");
-        put_mhz(pll0);
-        puts(b"   PLL1 = ");
-        put_mhz(pll1);
-        puts(b"   PLL2 = ");
-        put_mhz(pll2);
-        puts(b"\r\nCPU (aclk) = ");
-        put_mhz(aclk);
-        puts(b"   APB0 = ");
-        put_mhz(apb0);
-        puts(b"   APB1 = ");
-        put_mhz(apb1);
-        puts(b"   APB2 = ");
-        put_mhz(apb2);
-        // Cross-check against the independently measured CLINT mtime (= aclk/50).
-        let expect = aclk / 50;
-        let diff = if expect > MTIME_HZ_MEASURED {
-            expect - MTIME_HZ_MEASURED
-        } else {
-            MTIME_HZ_MEASURED - expect
-        };
-        puts(b"\r\naclk/50 = ");
-        put_mhz(expect);
-        puts(b" vs measured mtime ");
-        put_mhz(MTIME_HZ_MEASURED);
-        if diff < 50_000 {
-            puts(b"  -> MATCH (within 0.05 MHz)\r\n");
-        } else {
-            puts(b"  -> differ\r\n");
+            puts(b"  -> no ACK (0xffff); check the camera FFC orientation\r\n");
         }
-
         delay(20_000_000);
     }
 }
