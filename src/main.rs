@@ -1,16 +1,14 @@
-//! K210 hardware SHA256 accelerator demo. k210-hal's `sha256` module is a
-//! `todo!()` stub, so this drives the peripheral directly via the PAC: set the
-//! padded-block count, feed the software-padded message as little-endian u32
-//! words into `data_in` (polling `fifo_in_full`), then read the 8 result words.
+//! K210 hardware AES-128 ECB accelerator demo. HAL `aes` is a `todo!()` stub, so
+//! we drive the PAC directly: load the key, mode, then feed plaintext and read
+//! ciphertext through the data FIFOs.
 //!
-//! Two K210 quirks found the hard way:
-//!   - the result comes out word-reversed AND byte-swapped, so
-//!     `digest_word[i] = result[7-i]` read little-endian (`to_le_bytes`);
-//!   - `function_reg_0.en` doesn't reliably clear on done, so we just give the
-//!     block a moment and read (the hash is ready right after feeding).
+//! K210 quirks found by diffing against the FIPS-197 vector:
+//!   - `endian=1` must be written BEFORE the key (order-dependent; otherwise the
+//!     key is interpreted wrong and you get a valid-but-wrong ciphertext);
+//!   - key words go in reversed order, all words little-endian; ciphertext words
+//!     come out little-endian.
 //!
-//! Unambiguous: SHA256("abc") is computed in hardware and checked against the
-//! known vector ba7816bf...20015ad -> PASS/FAIL over serial.
+//! FIPS-197: key=000102..0f, pt=00112233..ff, ct=69c4e0d86a7b0430d8cdb78070b4c55a
 
 #![no_std]
 #![no_main]
@@ -46,53 +44,38 @@ fn delay(n: u32) {
     }
 }
 
-/// SHA256 of `input` via the K210 hardware accelerator (output = 32 bytes).
-fn sha256_hard(input: &[u8], out: &mut [u8; 32]) {
-    let sha = pac::SHA256::ptr();
+/// AES-128 ECB encrypt one 16-byte block via the K210 hardware accelerator.
+fn aes128_ecb_encrypt(key: &[u8; 16], pt: &[u8; 16], ct: &mut [u8; 16]) {
+    let base = pac::AES::ptr() as usize;
+    let w = |off: usize, val: u32| unsafe { core::ptr::write_volatile((base + off) as *mut u32, val) };
+    let r = |off: usize| -> u32 { unsafe { core::ptr::read_volatile((base + off) as *const u32) } };
+    let le = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+
     unsafe {
         let sc = pac::SYSCTL::ptr();
-        (*sc).clk_en_peri.modify(|_, w| w.sha_clk_en().set_bit());
-        (*sc).peri_reset.modify(|_, w| w.sha_reset().set_bit());
-        (*sc).peri_reset.modify(|_, w| w.sha_reset().clear_bit());
+        (*sc).clk_en_peri.modify(|_, w| w.aes_clk_en().set_bit());
+        (*sc).peri_reset.modify(|_, w| w.aes_reset().set_bit());
+        (*sc).peri_reset.modify(|_, w| w.aes_reset().clear_bit());
+    }
 
-        let blocks = ((input.len() + 64 + 8) / 64) as u16; // 512-bit blocks incl. padding
-        let total = blocks as usize * 64;
+    w(0x28, 1); // endian = 1 -- MUST be before the key
+    for i in 0..4 {
+        w((3 - i) * 4, le(&key[i * 4..])); // key @0x00, reversed word order
+    }
+    w(0x10, 0); // encrypt_sel = encrypt
+    w(0x14, 0); // mode_ctl = ECB, 128-bit key
+    w(0x30, 0); // dma_sel = off
+    w(0x34, 0); // aad_num
+    w(0x3c, 15); // pc_num = block_len - 1
+    w(0x64, 1); // enable
 
-        (*sha).num_reg.write(|w| w.data_cnt().bits(blocks));
-        (*sha).function_reg_1.modify(|_, w| w.dma_en().clear_bit());
-        (*sha)
-            .function_reg_0
-            .modify(|_, w| w.endian().set_bit().en().set_bit());
-
-        // SHA padding done in software: msg + 0x80 + zeros + 64-bit big-endian length.
-        let lenb = ((input.len() as u64) * 8).to_be_bytes();
-        let byte_at = |idx: usize| -> u8 {
-            if idx < input.len() {
-                input[idx]
-            } else if idx == input.len() {
-                0x80
-            } else if idx >= total - 8 {
-                lenb[idx - (total - 8)]
-            } else {
-                0
-            }
-        };
-        for i in 0..(total / 4) {
-            let word = u32::from_le_bytes([
-                byte_at(i * 4),
-                byte_at(i * 4 + 1),
-                byte_at(i * 4 + 2),
-                byte_at(i * 4 + 3),
-            ]);
-            while (*sha).function_reg_1.read().fifo_in_full().bit_is_set() {}
-            (*sha).data_in.write(|w| w.bits(word));
-        }
-
-        delay(100_000); // let the last block finish
-        for i in 0..8 {
-            // word-reversed + byte-swapped: out word i = result[7-i], little-endian
-            out[i * 4..i * 4 + 4].copy_from_slice(&(*sha).result[7 - i].read().bits().to_le_bytes());
-        }
+    for i in 0..4 {
+        while r(0x4c) & 1 == 0 {} // data_in_flag
+        w(0x40, le(&pt[i * 4..])); // text_data
+    }
+    for i in 0..4 {
+        while r(0x68) & 1 == 0 {} // data_out_flag
+        ct[i * 4..i * 4 + 4].copy_from_slice(&r(0x60).to_le_bytes()); // out_data
     }
 }
 
@@ -105,29 +88,36 @@ fn main() -> ! {
     let clocks = k210_hal::clock::Clocks::new();
     let _serial = p.UARTHS.configure(115_200.bps(), &clocks);
 
-    let want: [u8; 32] = [
-        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22,
-        0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00,
-        0x15, 0xad,
+    let key = [
+        0x00u8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f,
     ];
-    let mut digest = [0u8; 32];
-    sha256_hard(b"abc", &mut digest);
-    let pass = digest == want;
+    let pt = [
+        0x00u8, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0xff,
+    ];
+    let want = [
+        0x69u8, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4, 0xc5,
+        0x5a,
+    ];
+    let mut ct = [0u8; 16];
+    aes128_ecb_encrypt(&key, &pt, &mut ct);
+    let pass = ct == want;
 
-    puts(b"\r\n-- K210 hardware SHA256 --\r\n");
-    puts(b"SHA256(\"abc\") = ");
-    for &b in digest.iter() {
+    puts(b"\r\n-- K210 hardware AES-128 ECB --\r\n");
+    puts(b"ct       = ");
+    for &b in ct.iter() {
         put_hex_byte(b);
     }
-    puts(b"\r\nexpected      = ");
+    puts(b"\r\nexpected = ");
     for &b in want.iter() {
         put_hex_byte(b);
     }
     puts(b"\r\n");
 
     loop {
-        puts(b"SHA256(abc)=");
-        for &b in digest.iter() {
+        puts(b"AES-128 ECB ");
+        for &b in ct.iter() {
             put_hex_byte(b);
         }
         puts(if pass { b" PASS\r\n" } else { b" FAIL\r\n" });
