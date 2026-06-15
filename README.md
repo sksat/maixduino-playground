@@ -5,13 +5,18 @@
 ペリフェラルを1個ずつ触っていく実験リポジトリ。`src/main.rs` がその時の題材
 （過去のは git 履歴に。シリアル出力は全デモ共通で UARTHS 115200）。
 
-- **カメラ (OV2640/DVP) 撮影**（現 `src/main.rs` + [src/dvp.rs](src/dvp.rs)）: DVP+SCCB ドライバを
-  [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff) から移植。OV2640 を検出
-  （SCCB で `manuf=0x7fa2/product=0x2642`）→ 設定 → RGB565 フレームを DVP（自前 AXI マスタ）で SRAM に
-  取り込み → シリアルにダンプし、ホスト側 `uv run python` で PNG 化（`captures/`、未コミット）。
-  実機で **本物の写真**（320×240、行間相関 0.79）。ハマり所2つ: ① **カメラ FFC の逆挿し**で全 SCCB が
-  0xff（未接続と同症状）、② **PCLK が速すぎてピクセルが水平に化ける** → XCLK 分周を 3→7 に下げて解決。
-  DVP には**キャッシュ有りアドレス**を渡し、CPU は**無しエイリアス(0x4000_0000)**で読む。
+- **カメラ (OV2640/DVP) — UXGA JPEG 撮影**（現 `src/main.rs` + [src/dvp.rs](src/dvp.rs)）: OV2640 を
+  JPEG モードで **UXGA 1600×1200**（このカメラの最大解像度）に設定し、DVP（自前 AXI マスタ）で JPEG
+  バイト列を SRAM に取り込み。**デバイス上で SOI/EOI(FF D8…FF D9)を探して JPEG 部分だけダンプ**するので
+  圧縮済み ~150KB で 115200 でも十数秒。ホストは `uv run python` でバイトをそのまま `.jpg` 保存
+  （`captures/`、未コミット）。実機で**正しい UXGA JPEG**（FFD8FFE0…FFD9、上部に実シーン）。
+  ただし **DVP データ経路に ~1誤り/15-30KB のバイト誤り**があり（RGB ではごま塩で不可視・JPEG は
+  リスタートマーカー無しのため最初の1誤りで以降全壊）、長い UXGA JPEG は化ける ── この基板の信号品質限界。
+- **カメラ — 320×240 RGB565 撮影**（コミット `7d57593`）: RGB565 フレームを取り込み PNG 化、**クリーンな
+  実写真**。ハマり所: ① **カメラ FFC の逆挿し**で全 SCCB が 0xff（未接続と同症状）、② **PCLK が速すぎて
+  水平に化ける** → XCLK 分周を 3→7 に下げて解決。DVP には**キャッシュ有りアドレス**を渡し CPU は
+  **無しエイリアス(0x4000_0000)**で読む。DVP/SCCB ドライバは
+  [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff) から移植（[src/dvp.rs](src/dvp.rs)）。
 - **クロック/PLL 読み出し**（コミット `6c3723f`）: sysctl の PLL0/1/2・分周器レジスタをデコードして
   実周波数を算出（`PLLn = 26MHz/(clkr+1)*(clkf+1)/(clkod+1)`、`aclk=PLL0/2^(div+1)`）。実機で
   **PLL0=780MHz / CPU(aclk)=390MHz / APB=195MHz**。独立に UART 校正した CLINT mtime（=aclk/50）と
