@@ -42,6 +42,7 @@ impl Dmac {
         d
     }
 
+    #[allow(dead_code)] // handy for bring-up / the mem-to-mem demo
     pub fn id(&self) -> u64 {
         self.dmac.id.read().bits()
     }

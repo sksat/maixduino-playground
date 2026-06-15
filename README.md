@@ -5,12 +5,17 @@
 ペリフェラルを1個ずつ触っていく実験リポジトリ。`src/main.rs` がその時の題材
 （過去のは git 履歴に。シリアル出力は全デモ共通で UARTHS 115200）。
 
-- **DMAC メモリ間転送**（現 `src/main.rs` + [src/dmac.rs](src/dmac.rs)）: DesignWare AXI DMA に
-  HAL は無い（k210-hal の `dmac` は 32 行スタブ）ので PAC 直叩き。register sequence は唯一の完動
-  Rust 実装 [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff) から移植し、現行の
-  k210-hal/riscv-rt 0.11 に適合。64 語をコピーして照合 → `PASS`。K210 の癖: SRAM は 0x8000_0000 が
-  キャッシュ有り／0x4000_0000 が無し別名なので、DMA バッファは**無し別名経由**で扱いコヒーレンシを確保。
-  （これは次の FFT デモの土台。**K210 FFT は MMIO データ経路を持たず DMA でしか叩けない**ことが判明したため。）
+- **FFT HW アクセラレータ（DMA 駆動）**（現 `src/main.rs`）: 実信号トーン
+  `x[n]=10000·cos(2π·8n/64)` を 64 点 FFT → スペクトルが **bin 8（とミラー bin 56）にピーク**、
+  振幅は shift=0x3F の 1/64 正規化どおり 5000、隣接 bin は 0 で `PASS`。
+  **K210 FFT は MMIO データ経路を持たない**（FIFO への CPU 書き込みは握り潰される＝実機確認済み）。
+  TX/RX リクエストのハンドシェイクで **DMA とだけ**やり取りするので、送信(RAM→入力FIFO)・受信
+  (出力FIFO→RAM) の 2 チャネルを同時に回して駆動。
+- **DMAC ドライバ + メモリ間転送**（[src/dmac.rs](src/dmac.rs), コミット `b713365`）: DesignWare
+  AXI DMA に HAL は無い（k210-hal の `dmac` は 32 行スタブ）ので PAC 直叩き。register sequence は唯一の
+  完動 Rust 実装 [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff) から移植し、現行の
+  k210-hal/riscv-rt 0.11 に適合。K210 の癖: SRAM は 0x8000_0000 がキャッシュ有り／0x4000_0000 が無し
+  別名なので、DMA バッファは**無し別名経由**で扱いコヒーレンシを確保。
 - **AES-128 ECB HW アクセラレータ**（コミット `2b4f948`）: PAC 直叩き。FIPS-197 のテストベクタを
   暗号化 → 既知の `69c4e0d8...c55a` と照合し `PASS`。K210 の癖: `endian` レジスタを**鍵書き込みより
   先に**立てる（順序依存）、鍵は語順逆の LE、出力は LE。
