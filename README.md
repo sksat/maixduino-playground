@@ -5,11 +5,14 @@
 ペリフェラルを1個ずつ触っていく実験リポジトリ。`src/main.rs` がその時の題材
 （過去のは git 履歴に。シリアル出力は全デモ共通で UARTHS 115200）。
 
-- **マシンタイマ割り込み (ISR)**（現 `src/main.rs`）: ここまで全部ポーリングだったが、これは
-  割り込み駆動。CPU は `wfi` で寝て、CLINT マシンタイマ ISR が `mtimecmp` 再アーム・tick カウント・
-  IO6(LED) トグルを行う。riscv-rt は mtvec を張るだけなので `mie.MTIE`/`mstatus.MIE` は生 CSR 書き込みで
-  自前で有効化。出力 1 行＝割り込み 1 回なので、ホスト側タイムスタンプの行間が **きっかり 0.500s（2 Hz）**
-  で周期を実証。
+- **クロック/PLL 読み出し**（現 `src/main.rs`）: sysctl の PLL0/1/2・分周器レジスタをデコードして
+  実周波数を算出（`PLLn = 26MHz/(clkr+1)*(clkf+1)/(clkod+1)`、`aclk=PLL0/2^(div+1)`）。実機で
+  **PLL0=780MHz / CPU(aclk)=390MHz / APB=195MHz**。独立に UART 校正した CLINT mtime（=aclk/50）と
+  クロスチェック → `7.80 vs 7.79 MHz, MATCH`。2 つの独立手法で CPU 周波数が裏取りできた。
+- **マシンタイマ割り込み (ISR)**（コミット `14173c0`）: 初の割り込み駆動。CPU は `wfi` で寝て、CLINT
+  マシンタイマ ISR が `mtimecmp` 再アーム・tick カウント・IO6(LED) トグル。riscv-rt は mtvec を張るだけ
+  なので `mie.MTIE`/`mstatus.MIE` は生 CSR で自前有効化。出力 1 行＝割り込み 1 回、ホスト側の行間が
+  **きっかり 0.500s（2 Hz）** で周期を実証。
 - **FFT HW アクセラレータ（DMA 駆動）**（コミット `1e8b233`）: 実信号トーン
   `x[n]=10000·cos(2π·8n/64)` を 64 点 FFT → **bin 8（とミラー bin 56）にピーク**、振幅 5000・隣接 0 で `PASS`。
   **K210 FFT は MMIO データ経路を持たない**（FIFO への CPU 書き込みは握り潰される＝実機確認済み）ので、
