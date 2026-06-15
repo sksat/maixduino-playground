@@ -17,10 +17,13 @@
   （0x17/0x18/0x19/0x1a/0x32）・DSP スケーラ（0xc0/0xc1/0x50-0x5c）・PCLK 分周（0xd3）を**全部まとめて**
   動かす必要がある。ArduCAM の `640x480_JPEG` の窓/スケーラ表を流用しつつ、最終フォーマットだけ
   JPEG(0xda=0x10)→ RGB565(0xda=0x08) に差し替え（smart-friend/codex と協働で導出）。
-  **シリアルは UARTHS 1.5Mbaud**（614400B が約8秒/枚、115200 比 約7倍）。以前「高ボーレートは化ける」と
+  **シリアルは UARTHS 1.5Mbaud**（614400B が**約5秒/枚**、115200 比 約10倍）。以前「高ボーレートは化ける」と
   していたのはホスト側の早すぎる timeout が原因で、1.5M では IMGSTART ヘッダもフレームもバイト単位でクリーン。
   分周は `cpu/baud-1`（cpu=390MHz 固定）で 1.5M→div 259＝厳密に 390e6/260。2M/3M も厳密分周だが化ける
   （io5 の信号品質限界、1.5M が上限。kflash の書き込みも同じ UARTHS を 1.5M で使うので実績あり）。
+  ホスト側 [tools/grab.py](tools/grab.py) は **numpy でベクトル化**（RGB565展開・複数枚 temporal median・
+  per-row destripe・PNG 化）── 純Python では 640×480 で約60秒かかっていた処理が**0.1秒未満**。
+  `uv run python tools/grab.py --frames 5 --out captures/clean.png`（5枚 median の実写真が合計 ~28 秒）。
 - **カメラ — UXGA 1600×1200 JPEG 撮影（最大解像度）**（コミット `f5dbb55`）: OV2640 を JPEG/UXGA に設定
   （ArduCAM レジスタ表）、DVP で JPEG バイト列を取り込み、**デバイス上で SOI/EOI(FF D8…FF D9)を探して
   JPEG 部分だけダンプ**（圧縮済み ~150KB）。**正しい UXGA JPEG**（FFD8FFE0…FFD9、上部に実シーン）。

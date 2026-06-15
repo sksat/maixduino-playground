@@ -6,4 +6,5 @@ requires-python = ">=3.9"
 dependencies = [
     # K210 UART ISP flashing utility. Used as `uv run kflash ...`.
     "kflash>=1.1.6,<2",
+    "numpy>=2.0.2",
 ]

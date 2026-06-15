@@ -113,7 +113,7 @@ fn main() -> ! {
     dvp.set_display_addr(Some(cached as u32));
     dvp.set_auto(false);
 
-    delay(200_000_000); // auto-exposure / white-balance settle
+    delay(60_000_000); // brief settle; the warm-up frames below do the real AE/AWB settling
     for _ in 0..16 {
         dvp.get_image(); // warm-up frames (discard)
     }
@@ -134,6 +134,9 @@ fn main() -> ! {
             putc((word >> 24) as u8);
         }
         puts(b"IMGEND\n");
-        delay(40_000_000);
+        // Small gap so the host can resync on IMGEND/IMGSTART; kept tiny because
+        // this is an unoptimized debug build where nop loops are expensive (the
+        // old 40M loop added ~10s between frames, dwarfing the ~5s transfer).
+        delay(2_000_000);
     }
 }
