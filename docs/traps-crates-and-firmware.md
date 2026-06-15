@@ -54,5 +54,7 @@ MicroPython ファームを探すなら注意: 今の
   SPI、GPIO/GPIOHS（一部 —— 上記）、DMAC、タイマ/`clint`、`plic`、そして
   アクセラレータの `aes`/`sha256`/`fft`/`apu`。
 - **PAC レベル（`k210-pac`）:** 全ペリフェラルの全レジスタ。HAL の無いものも含む。
-- **穴:** **KPU/NPU**（AI アクセラレータ）や **DVP カメラ**の成熟した HAL は無い ——
-  ここは C SDK がまだ先行。PAC + `unsafe` で叩けるが自力。
+- **穴:** **KPU/NPU**（AI アクセラレータ）や **DVP カメラ**の HAL クレートは無い ——
+  PAC（`k210-pac` には DVP レジスタブロックが有る）+ `unsafe` で叩く。ただし DVP は
+  Rust の動作実装が [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff)
+  （`soc/dvp.rs` + `board/ov2640.rs`, `dvp-ov` 例）に有るので移植元にできる。

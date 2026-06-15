@@ -58,8 +58,16 @@ sudo gpasswd -a "$USER" uucp
 ## カメラ & WiFi —— 使えるが、既製の Rust HAL は無い
 
 - **カメラ (OV2640/GC0328):** K210 の **DVP** パラレルインタフェース経由で KPU/AI
-  パイプラインに入る。**`k210-hal` に DVP ドライバは無い** —— `k210-pac` のレジスタを
-  自分で叩く必要がある（C SDK や MaixPy にはあるが、Rust にはまだ無い）。
+  パイプラインに入る。整理すると:
+  - **HAL クレートには無い:** 使っている git 版 `k210-hal` に `dvp` モジュールは無い
+    （aes/sha256/fft 等はあるが DVP は欠落）。
+  - **PAC にはレジスタ定義が有る:** `k210-pac 0.2.0` には完全な `DVP` レジスタブロックが
+    入っている（`dvp_cfg` / `r/g/b_addr` / `cmos_cfg` / `sccb_cfg`・`sccb_ctl`（センサ設定用
+    の SCCB バス内蔵）/ `axi` / `sts` / `rgb_addr`）。AES/SHA256 と同じ **PAC 直叩き**で書ける。
+  - **Rust の動作実装は既に有る:** [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff)
+    の `rust/dvp-ov` が OV2640 からフレームを読んで LCD に出す完動例で、`k210-shared` 内に
+    `soc/dvp.rs`（DVP+SCCB ドライバ）と `board/ov2640.rs`（センサ設定）を持つ。割り込み/DMA
+    未使用のポーリング実装。**ゼロから書く必要はなく、これを移植すればよい**。
 - **WiFi (ESP32):** ESP32 はボード上の*別 MCU* で独自ファームを動かしており、K210 とは
   **SPI/UART** で通信する。Rust からはそのホスト側プロトコル（AT コマンド or Sipeed の
   SPI プロトコル）を `k210-hal` の SPI/シリアル上に自分で実装することになる。可能だが、
