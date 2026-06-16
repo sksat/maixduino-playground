@@ -12,14 +12,19 @@
   → XCLK 分周を 3→7 に下げて解決。DVP には**キャッシュ有りアドレス**を渡し CPU は**無しエイリアス
   (0x4000_0000)**で読む。DVP/SCCB ドライバは [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff)
   から移植。
-- **ESP32（オンボード WiFi）— nina-fw SPI 疎通 (step 2)**（現 `src/main.rs`）: ESP32 の nina-fw に
-  **SPI で `GET_FW_VERSION`(0x37) を投げてバージョン文字列を取得** → SPI リンク＋プロトコルが端まで動作。
-  実機で `cmd=0xb7(=0x37|0x80) nparams=1 end=0xEE`、**fw version "1.2.2"**、`PASS`。k210-hal の SPI は未完成
-  なので **GPIOHS で SPI を bit-bang**。配線は MaixPy 既定ドライバ準拠で **EN=IO8 / CS=IO25 / READY=IO9 /
-  SCLK=IO27 / MOSI=IO28 / MISO=IO26**（CS と READY が回路図ネット名と逆なのが最大の罠）。他のハマり: ①GPIOHS
-  関数デフォルトはパッドの入力バッファ(ie_en)を立てない→READY/MISO の `ie_en` を明示的に有効化（+pd クリア）、
-  ②nina スレーブは**立ち上がりエッジで MISO を出す**ので SCLK を上げる**前**にサンプル（最初これで1ビットずれた）。
-  ハンドシェイク: READY low=ready、CS low で high(選択/busy)、コマンドと応答は別 CS フレーム。次は接続→ソケット。
+- **ESP32（オンボード WiFi）— WiFi スキャン (step 3, nina-fw over 内蔵SPI0)**（現 `src/main.rs` +
+  [src/nina.rs](src/nina.rs)）: ESP32 を nina-fw コマンドで叩いて**周辺の WiFi AP を列挙**（接続なし・認証情報不要）。
+  `START_SCAN_NETWORKS`(0x36)→`SCAN_NETWORKS`(0x27) で SSID 一覧、`GET_IDX_RSSI`(0x32) で RSSI。実機で
+  **周囲9個の AP を SSID＋RSSI(dBm) 付きで取得**。決め手は **bit-bang をやめて K210 の内蔵 SPI0(DesignWare SSI)**
+  に置換したこと: 最適化なしビルドの bit-bang はクロックジッタで連続コマンドが化け・ESP32 が wedge していたが、
+  ハードSPI は一定クロックで **GET_FW_VERSION ×8 が retries=0 で全成功**＝ジッタ消滅。CS/READY/EN だけ GPIO に
+  残し（フレーム中 CS を保持）、SCLK/MOSI/MISO を SPI0 へ。k210-hal の SPI は transfer 系が未実装スタブなので
+  **CTRLR0/SSIENR/SER/BAUDR/DR(FIFO) を PAC 直叩き**（mode0・full-duplex・8bit、SSI 自前 SS は未配線で常時選択）。
+- **ESP32 — nina-fw SPI 疎通 (step 2)**（コミット `22dffcc`）: nina-fw に **SPI で `GET_FW_VERSION`(0x37)**
+  を投げ **"1.2.2"** 取得。最初は **GPIOHS で bit-bang**（単発は動くが連続コマンドは不安定→step 3 でハードSPI化）。
+  配線は MaixPy 既定ドライバ準拠 **EN=IO8 / CS=IO25 / READY=IO9 / SCLK=IO27 / MOSI=IO28 / MISO=IO26**
+  （**CS と READY が回路図ネット名と逆**なのが最大の罠）。他のハマり: GPIOHS 関数デフォルトはパッド入力バッファ
+  (ie_en)を立てない→READY/MISO で明示有効化。ハンドシェイク: READY low=ready、CS low で high、コマンドと応答は別フレーム。
 - **ESP32 リンク確立 — step 1（UART でファーム判定）**（コミット `ebe71cc`）: **IO8=ESP32_EN** をパルスして
   リセット → UART1(IO6/IO7,115200) で **ブートバナーを捕捉**（`ets Jun 8 2016 … SPI_FAST_FLASH_BOOT … entry
   0x4008068c`）→ ESP32 が生きてファーム在中を確認。`AT\r\n`×3 は**無応答** ＝ esp-at ではなく **nina-fw(SPI)**。
