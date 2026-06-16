@@ -43,8 +43,10 @@ void setup() {
   Serial.setRxBufferSize(4096);
   Serial.begin(LINK_BAUD);
   Serial.setTimeout(3000);
+  Serial.setDebugOutput(false); // keep IDF logs off UART0 (it's our protocol link)
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
   delay(50);
   // ready marker so the K210 can sync past the ROM boot noise
   Serial.write((const uint8_t *)"\xAA\x55MDM1\n", 7);
@@ -86,13 +88,14 @@ void loop() {
       WiFi.disconnect();
       WiFi.begin(ssid, pass);
       uint32_t t = millis();
-      while (WiFi.status() != WL_CONNECTED && millis() - t < 15000) delay(100);
+      while (WiFi.status() != WL_CONNECTED && millis() - t < 20000) delay(100);
       if (WiFi.status() == WL_CONNECTED) {
         IPAddress ip = WiFi.localIP();
         uint8_t b[4] = {ip[0], ip[1], ip[2], ip[3]};
         sendFrame('I', b, 4);
       } else {
-        sendFrame('E', nullptr, 0);
+        uint8_t st = (uint8_t)WiFi.status(); // report why (1=NO_SSID 4=FAIL 6=DISCONN)
+        sendFrame('E', &st, 1);
       }
       break;
     }
@@ -130,8 +133,11 @@ void loop() {
       break;
     }
 
-    case 'X': // close the client
-      if (client) client.stop();
+    case 'X': // flush + close the client (the S ack only means lwip accepted it)
+      if (client) {
+        client.flush();
+        client.stop();
+      }
       sendFrame('O', nullptr, 0);
       break;
 
