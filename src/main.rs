@@ -152,33 +152,23 @@ fn main() -> ! {
     put_dec(ip[3] as u32);
     puts(b"/\n");
 
-    // 2. serve loop: a fresh listening socket per request. availServer =
-    //    AVAIL_DATA_TCP with an accept flag -> the new client socket (255 = none);
-    //    read/reply on that client socket, then close both and re-listen.
+    // 2. PERSISTENT listening socket (WiFiServer model), with debug.
     let port_be = [0u8, 80u8];
     let mode = [0u8];
-    let accept = [1u8];
+    let accept = [0u8]; // WiFiServer's default: poll for a client-with-data
+    nina::request(nina::CMD_GET_SOCKET, &[], &mut buf, &mut lens);
+    let listen = buf[0];
+    let lp = [listen];
+    nina::request(nina::CMD_START_SERVER_TCP, &[&port_be, &lp, &mode], &mut buf, &mut lens);
+    puts(b"listen sock=");
+    put_dec(listen as u32);
+    putc(b'\n');
+
+    let mut served = 0u32;
     loop {
-        nina::request(nina::CMD_GET_SOCKET, &[], &mut buf, &mut lens);
-        let listen = buf[0];
-        let lp = [listen];
-        nina::request(nina::CMD_START_SERVER_TCP, &[&port_be, &lp, &mode], &mut buf, &mut lens);
-
-        // accept a client (poll ~15s)
-        let mut client = 255u8;
-        let mut w = 0;
-        while w < 150 {
-            let n = nina::request(nina::CMD_AVAIL_DATA_TCP, &[&lp, &accept], &mut buf, &mut lens);
-            let c = if n >= 1 { buf[0] } else { 255 };
-            if c != 255 && c != listen {
-                client = c;
-                break;
-            }
-            nina::sleep_ms(100);
-            w += 1;
-        }
-
-        if client != 255 {
+        let n = nina::request(nina::CMD_AVAIL_DATA_TCP, &[&lp, &accept], &mut buf, &mut lens);
+        let client = if n >= 1 { buf[0] } else { 255 };
+        if client != 255 && client != listen {
             let cp = [client];
             nina::sleep_ms(30);
             let a = nina::request(nina::CMD_AVAIL_DATA_TCP, &[&cp], &mut buf, &mut lens);
@@ -194,16 +184,17 @@ fn main() -> ! {
             }
             let mut resp = [0u8; 512];
             let rn = build_response(&mut resp, BODY);
-            nina::request_wide(nina::CMD_SEND_DATA_TCP, &[&cp, &resp[..rn]], &mut buf, &mut lens);
-            nina::sleep_ms(50);
+            nina::request_send(nina::CMD_SEND_DATA_TCP, &[&cp, &resp[..rn]], &mut buf, &mut lens);
+            nina::sleep_ms(40);
             nina::request(nina::CMD_STOP_CLIENT_TCP, &[&cp], &mut buf, &mut lens);
-            puts(b"served sock ");
-            put_dec(client as u32);
-            puts(b" req ");
+            nina::wait_idle(500);
+            served += 1;
+            puts(b"served #");
+            put_dec(served);
+            puts(b" (");
             put_dec(have as u32);
-            puts(b"B\n");
+            puts(b"B req)\n");
         }
-        nina::request(nina::CMD_STOP_CLIENT_TCP, &[&lp], &mut buf, &mut lens);
-        nina::sleep_ms(30);
+        nina::sleep_ms(50);
     }
 }

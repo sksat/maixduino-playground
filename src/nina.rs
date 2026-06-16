@@ -92,6 +92,13 @@ pub fn ready() -> bool {
     gpi(RDY)
 }
 
+/// Wait for the ESP32 to go idle (READY low) up to `ms`. Call after a slow command
+/// (e.g. STOP_CLIENT_TCP closing a socket) so the next request doesn't hit the busy
+/// slave and burn the whole retry budget timing out.
+pub fn wait_idle(ms: u64) -> bool {
+    wait_ready(false, ms)
+}
+
 fn xfer(b: u8) -> u8 {
     let s = spi();
     unsafe { s.dr[0].write(|w| w.bits(b as u32)) };
@@ -169,15 +176,17 @@ pub fn init() {
     sleep_ms(2000); // nina-fw boot
 }
 
-/// One send+receive of a nina command; returns (nparams, framing_valid). With
-/// `wide`, param lengths (both sent and received) are 16-bit big-endian instead of
-/// 8-bit — the data-transfer commands (SEND_DATA_TCP / GET_DATABUF) need that.
+/// One send+receive; returns (nparams, framing_valid). `send_wide`/`recv_wide`
+/// pick 16-bit big-endian param lengths vs 8-bit, INDEPENDENTLY for the request and
+/// the reply -- nina commands mix them: SEND_DATA_TCP sends 16-bit but replies 8-bit
+/// (waitResponseData8), while GET_DATABUF is 16-bit both ways.
 fn request_once(
     cmd: u8,
     params: &[&[u8]],
     resp: &mut [u8],
     lens: &mut [usize],
-    wide: bool,
+    send_wide: bool,
+    recv_wide: bool,
 ) -> (usize, bool) {
     // send: E0 <cmd> <nparams> [<len><data>..] EE, padded to a multiple of 4
     frame_begin();
@@ -186,7 +195,7 @@ fn request_once(
     xfer(params.len() as u8);
     let mut sent = 3u32;
     for p in params {
-        if wide {
+        if send_wide {
             xfer((p.len() >> 8) as u8);
             xfer((p.len() & 0xff) as u8);
             sent += 2;
@@ -226,7 +235,7 @@ fn request_once(
     let nparams = xfer(0xff) as usize;
     let mut off = 0;
     for i in 0..nparams {
-        let l = if wide {
+        let l = if recv_wide {
             ((xfer(0xff) as usize) << 8) | (xfer(0xff) as usize)
         } else {
             xfer(0xff) as usize
@@ -253,11 +262,12 @@ fn request_impl(
     params: &[&[u8]],
     resp: &mut [u8],
     lens: &mut [usize],
-    wide: bool,
+    send_wide: bool,
+    recv_wide: bool,
 ) -> usize {
     let mut attempt = 0;
     while attempt < 8 {
-        let (n, valid) = request_once(cmd, params, resp, lens, wide);
+        let (n, valid) = request_once(cmd, params, resp, lens, send_wide, recv_wide);
         if valid {
             unsafe { RETRIES = attempt };
             return n;
@@ -269,13 +279,18 @@ fn request_impl(
     0
 }
 
-/// Send a nina command and read the reply (8-bit param lengths), retrying a few
-/// times if the framing doesn't validate. Returns the number of reply params.
+/// Send a nina command and read the reply (8-bit param lengths both ways), retrying
+/// a few times if the framing doesn't validate. Returns the number of reply params.
 pub fn request(cmd: u8, params: &[&[u8]], resp: &mut [u8], lens: &mut [usize]) -> usize {
-    request_impl(cmd, params, resp, lens, false)
+    request_impl(cmd, params, resp, lens, false, false)
 }
 
-/// Like `request` but with 16-bit param lengths, for the TCP data commands.
+/// 16-bit param lengths both ways (GET_DATABUF: send sock+len wide, reply data wide).
 pub fn request_wide(cmd: u8, params: &[&[u8]], resp: &mut [u8], lens: &mut [usize]) -> usize {
-    request_impl(cmd, params, resp, lens, true)
+    request_impl(cmd, params, resp, lens, true, true)
+}
+
+/// 16-bit send, 8-bit reply (SEND_DATA_TCP: data sent wide, sent-length reply 8-bit).
+pub fn request_send(cmd: u8, params: &[&[u8]], resp: &mut [u8], lens: &mut [usize]) -> usize {
+    request_impl(cmd, params, resp, lens, true, false)
 }

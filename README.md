@@ -18,8 +18,11 @@
   パース）。nina サーバモデル: `GET_SOCKET`→`START_SERVER_TCP`(0x28) で待受、`AVAIL_DATA_TCP` を
   **2パラメータ `[listen_sock, accept=1]`** で呼ぶと**クライアントソケット番号**が返る（255=なし）→
   そのソケットで `GET_DATABUF`/`SEND_DATA`/`STOP`。レスポンスは `Content-Length` 付きでクリーンにクローズ。
-  TCP データ転送は **16ビット長パラメータ**（`request_wide`）。**既知の制限**: nina-fw 1.2.2 では1接続を
-  さばくと待受ソケットが次を accept しない（persistent も fresh も同症状）→ 連続リクエストは要追加調査。
+  待受ソケットは**永続**（WiFiServer モデル）、`availServer` の accept フラグは **0**。**連続リクエストも安定**
+  （curl ×4 すべて 200）。最大のハマり: **`SEND_DATA_TCP` は送信が16bit長だが応答は8bit長**(`waitResponseData8`)、
+  `GET_DATABUF` は両方16bit。混同して応答を16bitで読むと検証失敗→リトライで同じ送信を連打→ESP32 が wedge→以降全滅。
+  → 送受で長さ幅を独立指定（`request`=8/8, `request_wide`=16/16, `request_send`=16/8）。STOP 後は `wait_idle` で
+  ESP32 が落ち着くのを待ってから次の accept。同一LANのホストから `curl http://192.168.0.7/` で検証。
 - **ESP32（オンボード WiFi）— AP 接続 (step 4, nina-fw over 内蔵SPI0)**（コミット `9b4b84c` +
   [src/nina.rs](src/nina.rs)）: `SET_PASSPHRASE`(0x11) で SSID/パスを送り、`GET_CONN_STATUS`(0x20) を
   ポーリングして `WL_CONNECTED(3)` を待ち、`GET_IPADDR`(0x21) で**割り当て IP を取得**。
