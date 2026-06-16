@@ -16,3 +16,6 @@ __pycache__/
 
 # ESP32 raw flash dump (the .gz is committed instead)
 /esp32-firmware/*.bin
+
+# PlatformIO build output
+/esp32-modem/.pio/
