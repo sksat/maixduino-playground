@@ -1,8 +1,13 @@
-//! K210 camera web server (the goal): serve a web page over WiFi that shows the
-//! onboard camera. The camera (DVP) and WiFi (nina) both use SPI0, and a live DVP
-//! capture wedges the ESP32's network stack -- so we capture ONE frame at boot
-//! (before WiFi comes up), let `nina::init()` reset the ESP32 fresh, then serve that
-//! frozen snapshot as a 24-bit BMP on every `/cam.bmp` request.
+//! K210 camera web server (the goal): serve a web page over WiFi showing the onboard
+//! camera as a refreshing live stream. The camera (DVP) and WiFi (nina) both use
+//! SPI0, and a live DVP capture WEDGES the ESP32's network stack (the SPI link and
+//! conn-status survive, but L2/TCP dies). So we never capture while replying. Instead
+//! each `/cam.bmp` request serves the CURRENT frame on a healthy network, then -- after
+//! the client is closed -- captures the NEXT frame (wedging the net) and immediately
+//! recovers it (EN-reset + reconnect + re-open the listening socket). The served frame
+//! is thus one request stale, but every reply lands on a healthy link. Running the
+//! sensor continuously also lets its auto-exposure/white-balance converge (the boot
+//! snapshot is green/dark; later frames are correctly balanced).
 //!
 //! Credentials come from `wifi_creds.env` (gitignored) via `build.rs` -> `env!`.
 
@@ -102,6 +107,15 @@ const HTML: &[u8] = b"<!doctype html><html><head><meta http-equiv=\"refresh\" co
 
 fn sysctl() -> *const pac::sysctl::RegisterBlock {
     pac::SYSCTL::ptr()
+}
+
+/// Flip SPI0 to DVP-data mode, capture one frame into FRAME, flip back to the nina
+/// master. This time-multiplexes SPI0 between the camera and WiFi on a live session.
+fn capture(dvp: &Dvp) {
+    unsafe { (*sysctl()).misc.modify(|_, w| w.spi_dvp_data_enable().set_bit()) };
+    dvp.get_image();
+    unsafe { (*sysctl()).misc.modify(|_, w| w.spi_dvp_data_enable().clear_bit()) };
+    nina::spi_reinit();
 }
 
 /// Send all of `data` over the TCP socket `cp`, respecting backpressure: SEND_DATA
@@ -204,6 +218,53 @@ fn serve_bmp(cp: &[u8], buf: &mut [u8], lens: &mut [usize]) {
     send_all(cp, &img[..n], buf, lens);
 }
 
+/// (Re)connect to the AP. Returns the wl_status after polling (3 = connected).
+fn wifi_connect(buf: &mut [u8], lens: &mut [usize]) -> u8 {
+    nina::request(
+        nina::CMD_SET_PASSPHRASE,
+        &[WIFI_SSID.as_bytes(), WIFI_PASS.as_bytes()],
+        buf,
+        lens,
+    );
+    let mut stt = 0u8;
+    let mut t = 0;
+    while t < 20 {
+        nina::sleep_ms(500);
+        let n = nina::request(nina::CMD_GET_CONN_STATUS, &[], buf, lens);
+        stt = if n >= 1 { buf[0] } else { 0xff };
+        if stt == nina::WL_CONNECTED {
+            break;
+        }
+        t += 1;
+    }
+    stt
+}
+
+/// Print the current IP as `http://a.b.c.d/`.
+fn print_ip(buf: &mut [u8], lens: &mut [usize]) {
+    nina::request(nina::CMD_GET_IPADDR, &[&[0xff]], buf, lens);
+    puts(b"http://");
+    put_dec(buf[0] as u32);
+    putc(b'.');
+    put_dec(buf[1] as u32);
+    putc(b'.');
+    put_dec(buf[2] as u32);
+    putc(b'.');
+    put_dec(buf[3] as u32);
+    puts(b"/\n");
+}
+
+/// Open a fresh persistent listening socket on port 80. Returns its socket number.
+fn start_server(buf: &mut [u8], lens: &mut [usize]) -> u8 {
+    let port_be = [0u8, 80u8];
+    let mode = [0u8];
+    nina::request(nina::CMD_GET_SOCKET, &[], buf, lens);
+    let listen = buf[0];
+    let lp = [listen];
+    nina::request(nina::CMD_START_SERVER_TCP, &[&port_be, &lp, &mode], buf, lens);
+    listen
+}
+
 #[entry]
 fn main() -> ! {
     let p = pac::Peripherals::take().unwrap();
@@ -272,60 +333,23 @@ fn main() -> ! {
     nina::init();
     let mut buf = [0u8; 1024];
     let mut lens = [0usize; 8];
-    nina::request(
-        nina::CMD_SET_PASSPHRASE,
-        &[WIFI_SSID.as_bytes(), WIFI_PASS.as_bytes()],
-        &mut buf,
-        &mut lens,
-    );
-    puts(b"connecting");
-    let mut t = 0;
-    let mut stt = 0u8;
-    while t < 20 {
-        nina::sleep_ms(1000);
-        putc(b'.');
-        let n = nina::request(nina::CMD_GET_CONN_STATUS, &[], &mut buf, &mut lens);
-        stt = if n >= 1 { buf[0] } else { 0xff };
-        if stt == nina::WL_CONNECTED {
-            break;
-        }
-        t += 1;
-    }
-    putc(b'\n');
-    if stt != nina::WL_CONNECTED {
+    puts(b"connecting\n");
+    if wifi_connect(&mut buf, &mut lens) != nina::WL_CONNECTED {
         puts(b"wifi failed\n");
         loop {
             unsafe { core::arch::asm!("wfi") };
         }
     }
-    nina::request(nina::CMD_GET_IPADDR, &[&[0xff]], &mut buf, &mut lens);
-    puts(b"http://");
-    put_dec(buf[0] as u32);
-    putc(b'.');
-    put_dec(buf[1] as u32);
-    putc(b'.');
-    put_dec(buf[2] as u32);
-    putc(b'.');
-    put_dec(buf[3] as u32);
-    puts(b"/\n");
+    print_ip(&mut buf, &mut lens);
 
-    // server: persistent listening socket on port 80
-    let port_be = [0u8, 80u8];
-    let mode = [0u8];
     let accept = [0u8];
-    let gs = nina::request(nina::CMD_GET_SOCKET, &[], &mut buf, &mut lens);
-    let listen = buf[0];
-    let lp = [listen];
-    let ss = nina::request(nina::CMD_START_SERVER_TCP, &[&port_be, &lp, &mode], &mut buf, &mut lens);
+    let mut listen = start_server(&mut buf, &mut lens);
     puts(b"server up sock=");
     put_dec(listen as u32);
-    puts(b" gs=");
-    put_dec(gs as u32);
-    puts(b" ss=");
-    put_dec(ss as u32);
     putc(b'\n');
 
     loop {
+        let lp = [listen];
         let n = nina::request(nina::CMD_AVAIL_DATA_TCP, &[&lp, &accept], &mut buf, &mut lens);
         let client = if n >= 1 { buf[0] } else { 255 };
         if client != 255 && client != listen {
@@ -360,6 +384,8 @@ fn main() -> ! {
                     DBG_SENT = 0;
                     DBG_STALLS = 0;
                 }
+                // serve the CURRENT frame on the healthy network (the capture that
+                // produced it already ran + recovered on the previous request).
                 serve_bmp(&cp, &mut buf, &mut lens);
                 puts(b"frame: sent=");
                 put_dec(unsafe { DBG_SENT });
@@ -379,6 +405,24 @@ fn main() -> ! {
             nina::sleep_ms(40);
             nina::request(nina::CMD_STOP_CLIENT_TCP, &[&cp], &mut buf, &mut lens);
             nina::wait_idle(500);
+
+            if want_bmp {
+                // Client served and closed. Now refresh the frame for next time: the
+                // DVP capture WEDGES the ESP32 network (SPI link + conn-status survive
+                // but L2/TCP dies), so immediately recover by resetting + reconnecting
+                // the ESP32. Doing it here -- between requests, on a connection we've
+                // already closed -- keeps every actual serve on a healthy network.
+                capture(&dvp);
+                nina::init(); // EN-reset the ESP32 out of its wedged state
+                let st = wifi_connect(&mut buf, &mut lens);
+                listen = start_server(&mut buf, &mut lens);
+                puts(b"recover conn=");
+                put_dec(st as u32);
+                puts(b" sock=");
+                put_dec(listen as u32);
+                putc(b' ');
+                print_ip(&mut buf, &mut lens);
+            }
         }
         nina::sleep_ms(50);
     }
