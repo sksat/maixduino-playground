@@ -103,7 +103,7 @@ fn le32(out: &mut [u8], v: u32) {
     out[3] = (v >> 24) as u8;
 }
 
-const HTML: &[u8] = b"<!doctype html><html><head><meta http-equiv=\"refresh\" content=\"1\"><title>K210 cam</title></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera</h2><img src=\"/cam.bmp\" style=\"width:480px;image-rendering:pixelated\"><p>OV2640 over DVP, served by the onboard ESP32 (nina-fw). SPI0 time-multiplexed.</p></body></html>";
+const HTML: &[u8] = b"<!doctype html><html><head><meta http-equiv=\"refresh\" content=\"2\"><title>K210 cam</title></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera</h2><img src=\"/cam.bmp\" style=\"width:640px;image-rendering:auto\"><p>OV2640 160x120 over DVP, served live by the onboard ESP32 (nina-fw). SPI0 time-multiplexed; frame captured + network recovered between requests.</p></body></html>";
 
 fn sysctl() -> *const pac::sysctl::RegisterBlock {
     pac::SYSCTL::ptr()
@@ -118,33 +118,38 @@ fn capture(dvp: &Dvp) {
     nina::spi_reinit();
 }
 
-/// Send all of `data` over the TCP socket `cp`, respecting backpressure: SEND_DATA
-/// only queues as much as the ESP32's TCP buffer has room for and returns that
-/// count, so we advance by the queued amount and wait when it's full. Returns false
-/// if it stalls for too long.
 static mut DBG_SENT: u32 = 0;
 static mut DBG_STALLS: u32 = 0;
+static mut DBG_STATE: u8 = 0; // TCP client state seen when a send stalled (4 = established)
 
-/// Poll DATA_SENT_TCP until the socket's queued data has actually flushed (or a
-/// timeout). This is the flow control WiFiNINA does after every write -- without
-/// it the next SEND_DATA hits a full TCP buffer and silently drops data.
-fn check_data_sent(cp: &[u8], buf: &mut [u8], lens: &mut [usize]) {
+/// Poll DATA_SENT_TCP until the socket's queued data has actually flushed to the
+/// peer (or a timeout). Polls slowly (WiFiNINA uses 100 ms) so the single-threaded
+/// nina-fw gets CPU between polls to run its WiFi/TCP task and drain the buffer.
+fn check_data_sent(cp: &[u8], buf: &mut [u8], lens: &mut [usize]) -> bool {
     let mut i = 0;
-    while i < 50 {
+    while i < 60 {
         let n = nina::request(nina::CMD_DATA_SENT_TCP, &[cp], buf, lens);
         if n >= 1 && buf[0] == 1 {
-            return;
+            return true;
         }
-        nina::sleep_ms(5);
+        nina::sleep_ms(50);
         i += 1;
     }
+    false
 }
 
+/// Stream `data` over TCP socket `cp`. SEND_DATA returns how many bytes the ESP32's
+/// TCP buffer accepted; we advance by that. The catch: nina-fw is single-threaded,
+/// so hammering it with back-to-back SPI commands starves the task that actually
+/// transmits and frees the buffer -> it wedges full at a few KB. So we YIELD a little
+/// after every send (and longer when the buffer is full) to let it drain, then do one
+/// patient flush at the end before the caller closes the socket (else the tail is
+/// dropped).
 fn send_all(cp: &[u8], data: &[u8], buf: &mut [u8], lens: &mut [usize]) -> bool {
     let mut off = 0;
     let mut stalls = 0u32;
     while off < data.len() {
-        let end = (off + 1440).min(data.len());
+        let end = (off + 1024).min(data.len());
         let n = nina::request_send(nina::CMD_SEND_DATA_TCP, &[cp, &data[off..end]], buf, lens);
         let sent = if n >= 1 && lens[0] >= 2 {
             (buf[0] as usize) | ((buf[1] as usize) << 8)
@@ -152,70 +157,91 @@ fn send_all(cp: &[u8], data: &[u8], buf: &mut [u8], lens: &mut [usize]) -> bool 
             0
         };
         if sent == 0 {
+            // Buffer full. The ESP32 frees it by processing the peer's ACKs in its
+            // WiFi task -- which only runs when we're NOT hammering it over SPI. So
+            // go QUIET (no SPI commands at all) to let it drain, then retry.
             stalls += 1;
             unsafe { DBG_STALLS += 1 };
-            if stalls > 300 {
+            if stalls > 60 {
+                unsafe {
+                    DBG_STATE =
+                        nina::request(nina::CMD_GET_CLIENT_STATE_TCP, &[cp], buf, lens) as u8;
+                }
                 return false;
             }
-            nina::sleep_ms(10);
+            nina::sleep_ms(120);
         } else {
             let adv = sent.min(end - off);
             off += adv;
             unsafe { DBG_SENT += adv as u32 };
             stalls = 0;
-            check_data_sent(cp, buf, lens); // wait for the TCP buffer to flush
+            // Quiet gap so the ESP32 can transmit this chunk and process ACKs before
+            // we queue more -- keeps the lwip send buffer from filling and aborting.
+            nina::sleep_ms(30);
         }
     }
-    true
+    check_data_sent(cp, buf, lens)
 }
 
-// Served image size: a downsample of the WxH capture, kept small enough that the
-// whole BMP fits in the ESP32's TCP send buffer (~5.7 KB) and serves in one shot
-// without mid-transfer flow control.
-const OW: usize = 40;
-const OH: usize = 30;
+// Served image = the native WxH capture, no downsample. We never build the whole
+// BMP in memory (that'd be a ~57 KB stack array); instead we stream it: header
+// first, then pixel rows in CHUNK-sized pieces, each flow-controlled by send_all.
+// W*3 is a multiple of 4 (W=160 -> 480), so BMP rows need no padding.
+const CHUNK: usize = 1440;
 
-/// Build a 24-bit BMP of the captured frame (downsampled to OWxOH) and send it.
+/// Stream a native-resolution 24-bit BMP of the captured frame to socket `cp`.
 fn serve_bmp(cp: &[u8], buf: &mut [u8], lens: &mut [usize]) {
     let fb = (unsafe { core::ptr::addr_of!(FRAME.px) } as usize - UNCACHED_OFFSET) as *const u32;
-    let pixels = (OW * OH * 3) as u32;
+    let pixels = (W * H * 3) as u32;
     let filesize = 54 + pixels;
 
-    let mut img = [0u8; 128 + 54 + OW * OH * 3];
+    // HTTP + 54-byte BMP header (24bpp, bottom-up) in one small buffer.
+    let mut hdr = [0u8; 182];
     let mut n = 0;
-    n += append(&mut img, n, b"HTTP/1.1 200 OK\r\nContent-Type: image/bmp\r\nContent-Length: ");
-    n += write_dec(&mut img[n..], filesize);
-    n += append(&mut img, n, b"\r\nConnection: close\r\n\r\n");
-    // BMP header (54B), 24bpp, bottom-up
+    n += append(&mut hdr, n, b"HTTP/1.1 200 OK\r\nContent-Type: image/bmp\r\nContent-Length: ");
+    n += write_dec(&mut hdr[n..], filesize);
+    n += append(&mut hdr, n, b"\r\nConnection: close\r\n\r\n");
     let h0 = n;
-    img[n] = b'B';
-    img[n + 1] = b'M';
-    le32(&mut img[n + 2..], filesize);
-    le32(&mut img[n + 10..], 54);
-    le32(&mut img[n + 14..], 40);
-    le32(&mut img[n + 18..], OW as u32);
-    le32(&mut img[n + 22..], OH as u32);
-    img[n + 26] = 1;
-    img[n + 28] = 24;
-    le32(&mut img[n + 34..], pixels);
+    hdr[n] = b'B';
+    hdr[n + 1] = b'M';
+    le32(&mut hdr[n + 2..], filesize);
+    le32(&mut hdr[n + 10..], 54);
+    le32(&mut hdr[n + 14..], 40);
+    le32(&mut hdr[n + 18..], W as u32);
+    le32(&mut hdr[n + 22..], H as u32);
+    hdr[n + 26] = 1;
+    hdr[n + 28] = 24;
+    le32(&mut hdr[n + 34..], pixels);
     n = h0 + 54;
-    // pixels, bottom-up, BGR, nearest-neighbour downsample
-    let mut orow = OH;
-    while orow > 0 {
-        orow -= 1;
-        let sy = orow * H / OH;
-        for ocol in 0..OW {
-            let sx = ocol * W / OW;
-            let i = sy * W + sx;
+    if !send_all(cp, &hdr[..n], buf, lens) {
+        return;
+    }
+
+    // Pixels, bottom-up, BGR, streamed in CHUNK-byte pieces.
+    let mut chunk = [0u8; CHUNK];
+    let mut k = 0;
+    let mut row = H;
+    while row > 0 {
+        row -= 1;
+        for col in 0..W {
+            if k + 3 > CHUNK {
+                if !send_all(cp, &chunk[..k], buf, lens) {
+                    return;
+                }
+                k = 0;
+            }
+            let i = row * W + col;
             let word = unsafe { core::ptr::read_volatile(fb.add(i / 2)) };
             let px = if i & 1 == 0 { word & 0xffff } else { word >> 16 };
-            img[n] = ((px & 0x1f) << 3) as u8; // B
-            img[n + 1] = (((px >> 5) & 0x3f) << 2) as u8; // G
-            img[n + 2] = (((px >> 11) & 0x1f) << 3) as u8; // R
-            n += 3;
+            chunk[k] = ((px & 0x1f) << 3) as u8; // B
+            chunk[k + 1] = (((px >> 5) & 0x3f) << 2) as u8; // G
+            chunk[k + 2] = (((px >> 11) & 0x1f) << 3) as u8; // R
+            k += 3;
         }
     }
-    send_all(cp, &img[..n], buf, lens);
+    if k > 0 {
+        send_all(cp, &chunk[..k], buf, lens);
+    }
 }
 
 /// (Re)connect to the AP. Returns the wl_status after polling (3 = connected).
@@ -391,6 +417,8 @@ fn main() -> ! {
                 put_dec(unsafe { DBG_SENT });
                 puts(b" stalls=");
                 put_dec(unsafe { DBG_STALLS });
+                puts(b" state=");
+                put_dec(unsafe { DBG_STATE } as u32);
                 putc(b'\n');
             } else {
                 let mut resp = [0u8; 700];
@@ -413,11 +441,22 @@ fn main() -> ! {
                 // the ESP32. Doing it here -- between requests, on a connection we've
                 // already closed -- keeps every actual serve on a healthy network.
                 capture(&dvp);
-                nina::init(); // EN-reset the ESP32 out of its wedged state
-                let st = wifi_connect(&mut buf, &mut lens);
+                // Recover the wedged network. The reconnect is flaky (~1/3 of EN-reset
+                // attempts don't reach WL_CONNECTED in time), so retry until it sticks
+                // -- otherwise we'd serve a dead 0.0.0.0 link until the next request.
+                let mut st = 0u8;
+                let mut tries = 0u32;
+                while st != nina::WL_CONNECTED && tries < 8 {
+                    nina::init(); // EN-reset the ESP32 out of its wedged state
+                    st = wifi_connect(&mut buf, &mut lens);
+                    tries += 1;
+                }
                 listen = start_server(&mut buf, &mut lens);
+                nina::sleep_ms(800); // let the reconnected link settle (ARP/AP relearn)
                 puts(b"recover conn=");
                 put_dec(st as u32);
+                puts(b" tries=");
+                put_dec(tries);
                 puts(b" sock=");
                 put_dec(listen as u32);
                 putc(b' ');
