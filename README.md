@@ -12,16 +12,18 @@
   → XCLK 分周を 3→7 に下げて解決。DVP には**キャッシュ有りアドレス**を渡し CPU は**無しエイリアス
   (0x4000_0000)**で読む。DVP/SCCB ドライバは [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff)
   から移植。
-- **カメラ映像を WiFi で配信する Web サーバ (step 7 = ゴール)**（現 `src/main.rs` + [src/dvp.rs](src/dvp.rs)
-  + [src/nina.rs](src/nina.rs)）: ブラウザ/curl で K210 にアクセスすると**オンボードカメラの画像**が返り、
-  meta refresh で擬似ストリームになる。**最大の難所＝カメラ(DVP)と WiFi(nina) が両方 SPI0 を使う**ので
-  **時分割**: リクエストごとに `spi_dvp_data_enable` を立てて DVP で1フレーム撮影(SRAM)→ クリアして
-  `nina::spi_reinit()` で SPI0 を nina マスタに戻す→ BMP を生成して送信。実機で疎通確認済み（同一LANの
-  ホストから `curl` で実カメラの BMP を取得）。ハマり/制約: ① **SPI0 共存は時分割で成立**（撮影直後も
-  nina コマンドは生存）が、② カメラ撮影が**たまに ESP32 の WiFi 接続を壊す**（SPIリンクは生きてるが
-  ネットワークが落ちる→電源入れ直しで回復）、③ **TCP 送信バッファ(~5.7KB)のフロー制御**: `DATA_SENT_TCP`
-  でフラッシュ待ちしてもこの環境では大きい画像が詰まったので、**1バッファに収まる小さい画像(40×30 に縮小)**を
-  1ショットで返す方式。CS/READY/EN だけ GPIO に残し SCLK/MOSI/MISO を SPI0 へ（カメラの DVP データパッドと共有）。
+- **カメラ映像を WiFi で配信する Web サーバ (step 7 = ゴール・達成)**（現 `src/main.rs` + [src/dvp.rs](src/dvp.rs)
+  + [src/nina.rs](src/nina.rs)・コミット `8932f62`）: ブラウザ/curl で K210 にアクセスすると**オンボードカメラの
+  画像**が返り、meta refresh で擬似ストリームになる。同一LANのホストから `curl http://<board>/cam.bmp` で
+  実カメラの BMP を取得（3654B、`sent=3739 stalls=0` で完走）。**最大の難所＝カメラ(DVP)と WiFi(nina) が
+  両方 SPI0 を使う**こと。当初はリクエストごとに時分割撮影する設計だったが、**カメラ撮影が ESP32 の
+  ネットワークスタックを壊す**（SPIリンクは生きていて GET_CONN_STATUS は接続中=3 を返すのに、ARP/ping/TCP
+  が死ぬ）問題にぶつかった。**解決＝撮影を `nina::init()` の前（WiFi 起動前）に1回だけ行い**、その後 nina が
+  ESP32 をリセットして起動する構成にして、撮影が生きた接続に一切触れないようにした。サーバはその静止フレーム
+  を毎回返す。送る画像は **40×30 24bit BMP** に縮小して **ESP32 の TCP 送信バッファ(~5.7KB)に1ショットで収める**
+  （大きい画像は `DATA_SENT_TCP` のフロー制御でも詰まる→次回課題）。起動時のハートビート(`.`×20)はホスト側
+  シリアル捕捉が USB ブリッジの auto-reset を越えてアタッチする猶予。[tools/bmp2png.py](tools/bmp2png.py) は
+  numpy+zlib だけ(Pillow 不要)で BMP を PNG に拡大。残課題: 撮影ごとの WiFi 再初期化でライブ配信、より大きい/速いフレーム。
 - **ESP32（オンボード WiFi）— HTTP サーバ (step 6)**（コミット `444f036` + [src/nina.rs](src/nina.rs)）:
   WiFi 接続後、ポート80で待受し **ブラウザ/curl に HTML ページをサーブ**。実機で同一LANのホストから
   `curl http://192.168.0.7/` → `HTTP/1.1 200 OK`＋HTML を取得（`served sock 1 req 75B`＝実HTTPリクエストを
