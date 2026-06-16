@@ -1,8 +1,8 @@
 //! K210 camera web server (the goal): serve a web page over WiFi that shows the
-//! onboard camera, refreshing for a pseudo-stream. The camera (DVP) and WiFi (nina)
-//! both use SPI0, so SPI0 is TIME-MULTIPLEXED: per `/cam.bmp` request, flip SPI0 to
-//! DVP-data mode, capture an OV2640 frame to SRAM, flip SPI0 back to the nina
-//! master, and stream the frame out as a 24-bit BMP.
+//! onboard camera. The camera (DVP) and WiFi (nina) both use SPI0, and a live DVP
+//! capture wedges the ESP32's network stack -- so we capture ONE frame at boot
+//! (before WiFi comes up), let `nina::init()` reset the ESP32 fresh, then serve that
+//! frozen snapshot as a 24-bit BMP on every `/cam.bmp` request.
 //!
 //! Credentials come from `wifi_creds.env` (gitignored) via `build.rs` -> `env!`.
 
@@ -102,15 +102,6 @@ const HTML: &[u8] = b"<!doctype html><html><head><meta http-equiv=\"refresh\" co
 
 fn sysctl() -> *const pac::sysctl::RegisterBlock {
     pac::SYSCTL::ptr()
-}
-
-/// Flip SPI0 to DVP-data mode and capture one frame into FRAME.
-fn capture(dvp: &Dvp) {
-    unsafe { (*sysctl()).misc.modify(|_, w| w.spi_dvp_data_enable().set_bit()) };
-    dvp.get_image();
-    // back to the nina master so we can serve over WiFi
-    unsafe { (*sysctl()).misc.modify(|_, w| w.spi_dvp_data_enable().clear_bit()) };
-    nina::spi_reinit();
 }
 
 /// Send all of `data` over the TCP socket `cp`, respecting backpressure: SEND_DATA
@@ -238,9 +229,46 @@ fn main() -> ! {
     let clocks = k210_hal::clock::Clocks::new();
     let _serial = p.UARTHS.configure(BAUD.bps(), &clocks);
 
+    // brief heartbeat: gives the host serial capture time to attach (the USB
+    // bridge's auto-reset makes early bytes easy to miss) and shows boot progress.
+    for _ in 0..20 {
+        putc(b'.');
+        delay(15_000_000);
+    }
     puts(b"\nK210 camera web server\n");
 
-    // bring up WiFi first: nina takes over SPI0 as its master.
+    // Capture ONE frame BEFORE WiFi comes up. The DVP capture wedges the ESP32's
+    // network stack (the SPI link survives, but the live TCP connection dies), so we
+    // grab a static snapshot first and let `nina::init()` reset the ESP32 fresh
+    // afterwards. The server then serves this frozen frame -- no capture ever touches
+    // a live WiFi connection.
+    unsafe {
+        (*sysctl())
+            .power_sel
+            .modify(|_, w| w.power_mode_sel6().clear_bit().power_mode_sel7().clear_bit());
+        (*sysctl()).clk_en_cent.modify(|_, w| w.apb2_clk_en().set_bit());
+        (*sysctl()).clk_en_peri.modify(|_, w| w.spi0_clk_en().set_bit());
+        (*sysctl()).misc.modify(|_, w| w.spi_dvp_data_enable().set_bit());
+    }
+    let dvp = Dvp::new(p.DVP);
+    dvp.init();
+    let _ = ov2640_read_id(&dvp);
+    ov2640_init(&dvp);
+    ov2640_rgb565_qqvga(&dvp);
+    dvp.set_image_format(ImageFormat::RGB);
+    dvp.set_image_size(false, W as u16, H as u16);
+    let cached = unsafe { core::ptr::addr_of!(FRAME.px) } as *const u32 as usize;
+    dvp.set_ai_addr(None);
+    dvp.set_display_addr(Some(cached as u32));
+    dvp.set_auto(false);
+    delay(5_000_000);
+    for _ in 0..3 {
+        dvp.get_image();
+    }
+    unsafe { (*sysctl()).misc.modify(|_, w| w.spi_dvp_data_enable().clear_bit()) };
+    puts(b"camera frame captured\n");
+
+    // now bring up WiFi: nina resets the ESP32 and takes over SPI0 as its master.
     nina::init();
     let mut buf = [0u8; 1024];
     let mut lens = [0usize; 8];
@@ -280,39 +308,6 @@ fn main() -> ! {
     putc(b'.');
     put_dec(buf[3] as u32);
     puts(b"/\n");
-
-    // now bring up the camera (DVP-data mode for the SCCB/sensor config + warm-up),
-    // then hand SPI0 back to nina. Per-frame capture re-flips it (see `capture`).
-    unsafe {
-        (*sysctl())
-            .power_sel
-            .modify(|_, w| w.power_mode_sel6().clear_bit().power_mode_sel7().clear_bit());
-        (*sysctl()).clk_en_cent.modify(|_, w| w.apb2_clk_en().set_bit());
-        (*sysctl()).clk_en_peri.modify(|_, w| w.spi0_clk_en().set_bit());
-        (*sysctl()).misc.modify(|_, w| w.spi_dvp_data_enable().set_bit());
-    }
-    let dvp = Dvp::new(p.DVP);
-    dvp.init();
-    let _ = ov2640_read_id(&dvp);
-    ov2640_init(&dvp);
-    ov2640_rgb565_qqvga(&dvp);
-    dvp.set_image_format(ImageFormat::RGB);
-    dvp.set_image_size(false, W as u16, H as u16);
-    let cached = unsafe { core::ptr::addr_of!(FRAME.px) } as *const u32 as usize;
-    dvp.set_ai_addr(None);
-    dvp.set_display_addr(Some(cached as u32));
-    dvp.set_auto(false);
-    delay(5_000_000);
-    for _ in 0..2 {
-        dvp.get_image();
-    }
-    unsafe { (*sysctl()).misc.modify(|_, w| w.spi_dvp_data_enable().clear_bit()) };
-    nina::spi_reinit();
-    // confirm WiFi survived the capture (the SPI link does; the connection may not)
-    nina::request(nina::CMD_GET_CONN_STATUS, &[], &mut buf, &mut lens);
-    puts(b"camera ready, conn=");
-    put_dec(buf[0] as u32);
-    putc(b'\n');
 
     // server: persistent listening socket on port 80
     let port_be = [0u8, 80u8];
@@ -365,7 +360,6 @@ fn main() -> ! {
                     DBG_SENT = 0;
                     DBG_STALLS = 0;
                 }
-                capture(&dvp);
                 serve_bmp(&cp, &mut buf, &mut lens);
                 puts(b"frame: sent=");
                 put_dec(unsafe { DBG_SENT });
