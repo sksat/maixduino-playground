@@ -130,7 +130,7 @@ fn main() -> ! {
         cbuf[n] = b;
         n += 1;
     }
-    match uart_wifi::cmd(uart_wifi::CMD_CONNECT, &cbuf[..n], &mut reply, 20000) {
+    match uart_wifi::cmd(uart_wifi::CMD_CONNECT, &cbuf[..n], &mut reply, 35000) {
         Some((b'I', 4)) => {
             puts(b"IP ");
             put_dec(reply[0] as u32);
@@ -142,7 +142,47 @@ fn main() -> ! {
             put_dec(reply[3] as u32);
             putc(b'\n');
         }
-        Some((b'E', 1)) => {
+        Some((b'E', m)) if m >= 3 => {
+            let mut cs = 0u16;
+            for &b in &cbuf[..n] {
+                cs = cs.wrapping_add(b as u16);
+            }
+            let esp_cs = (reply[1] as u16) | ((reply[2] as u16) << 8);
+            puts(b"connect failed wl=");
+            put_dec(reply[0] as u32);
+            puts(b" csum k210=");
+            put_dec(cs as u32);
+            puts(b" esp=");
+            put_dec(esp_cs as u32);
+            if m >= 5 {
+                puts(b" esp_ssidlen=");
+                put_dec(reply[3] as u32);
+                puts(b" esp_passlen=");
+                put_dec(reply[4] as u32);
+            }
+            if m >= 6 {
+                puts(b" disc_reason=");
+                put_dec(reply[5] as u32);
+            }
+            if m >= 9 {
+                puts(b" ap_seen=");
+                put_dec(reply[6] as u32);
+                puts(b" ch=");
+                put_dec(reply[7] as u32);
+                puts(b" rssi=-");
+                put_dec((256 - reply[8] as u32) & 0xff); // rssi is negative dBm
+            }
+            if m >= 10 {
+                puts(b" enc=");
+                put_dec(reply[9] as u32); // 3=WPA2 6=WPA3 7=WPA2/WPA3-mixed
+            }
+            if m >= 11 {
+                puts(b" assoc=");
+                put_dec(reply[10] as u32); // 1 = association succeeded (then 4-way/pass)
+            }
+            puts(if cs == esp_cs { b" [PAYLOAD OK]\n" as &[u8] } else { b" [PAYLOAD CORRUPT]\n" });
+        }
+        Some((b'E', _)) => {
             puts(b"connect failed, wl_status=");
             put_dec(reply[0] as u32);
             putc(b'\n');

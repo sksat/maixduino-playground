@@ -197,6 +197,24 @@ pub fn cmd(
     if !payload.is_empty() {
         write(payload);
     }
+    // Resync to the reply's AA 55 prefix, skipping any line noise (e.g. from the
+    // ESP32 restarting its UART around the WiFi connect).
+    let mut b = [0u8; 1];
+    let mut state = 0u8;
+    loop {
+        if !read_exact(&mut b, timeout_ms) {
+            return None;
+        }
+        if state == 0 {
+            if b[0] == 0xAA {
+                state = 1;
+            }
+        } else if b[0] == 0x55 {
+            break;
+        } else {
+            state = if b[0] == 0xAA { 1 } else { 0 };
+        }
+    }
     let mut rh = [0u8; 3];
     if !read_exact(&mut rh, timeout_ms) {
         return None;

@@ -21,6 +21,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include "esp_wifi.h"
 
 static const uint32_t LINK_BAUD = 921600;
 static const uint16_t MAXPL = 1600;
@@ -28,13 +29,24 @@ static const uint16_t MAXPL = 1600;
 WiFiServer server(80);
 WiFiClient client;
 
+static volatile uint8_t lastDiscReason = 0; // last STA disconnect reason code
+static volatile uint8_t gotAssoc = 0;       // did STA_CONNECTED (association) fire?
+
+static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  if (event == ARDUINO_EVENT_WIFI_STA_CONNECTED) gotAssoc = 1;
+  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED)
+    lastDiscReason = info.wifi_sta_disconnected.reason;
+}
+
 static bool readN(uint8_t *buf, size_t n) {
   return Serial.readBytes(buf, n) == n;
 }
 
+// Reply frame: AA 55 <tag> <len:2 LE> <payload>. The AA55 sync prefix lets the K210
+// resync past line noise (e.g. the UART restart around WiFi connect).
 static void sendFrame(uint8_t tag, const uint8_t *payload, uint16_t len) {
-  uint8_t hdr[3] = {tag, (uint8_t)(len & 0xff), (uint8_t)(len >> 8)};
-  Serial.write(hdr, 3);
+  uint8_t hdr[5] = {0xAA, 0x55, tag, (uint8_t)(len & 0xff), (uint8_t)(len >> 8)};
+  Serial.write(hdr, 5);
   if (len) Serial.write(payload, len);
   Serial.flush();
 }
@@ -45,8 +57,17 @@ void setup() {
   Serial.setTimeout(3000);
   Serial.setDebugOutput(false); // keep IDF logs off UART0 (it's our protocol link)
   WiFi.persistent(false);
+  WiFi.onEvent(onWiFiEvent);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
+  // allow ch 1-13 (Japan/world); the default US region (ch 1-11) can't associate to
+  // an AP on ch 12/13 even though the scan finds it.
+  esp_wifi_set_country_code("JP", true);
+  // Force legacy 11b/g (no 11n/HT). idf 4.4 advertises HT caps that some routers
+  // reject during association -> reason-2 AUTH_EXPIRE with assoc never completing,
+  // while nina-fw (idf 3.3) associates fine.
+  esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G);
+  esp_wifi_set_max_tx_power(34); // low TX -- avoid RF saturation at the very close AP
   delay(50);
   // ready marker so the K210 can sync past the ROM boot noise
   Serial.write((const uint8_t *)"\xAA\x55MDM1\n", 7);
@@ -85,17 +106,73 @@ void loop() {
       uint16_t pl_off = z + 1;
       uint16_t pn = len - pl_off; if (pn > 79) pn = 79;
       memcpy(pass, pl + pl_off, pn); pass[pn] = 0;
-      WiFi.disconnect();
-      WiFi.begin(ssid, pass);
-      uint32_t t = millis();
-      while (WiFi.status() != WL_CONNECTED && millis() - t < 20000) delay(100);
+      lastDiscReason = 0; gotAssoc = 0;
+      WiFi.setAutoReconnect(true);
+      // The live UART0 peripheral interferes with WiFi association on the ESP32 (a
+      // documented cause of reason-2 AUTH_EXPIRE: "ESP32 + hardware UART = auth
+      // expired"). Our UART0 is the K210 link -- so QUIET it during scan+connect, then
+      // bring it back up to reply. The K210 is just waiting for the reply meanwhile.
+      Serial.flush();
+      Serial.end();
+      delay(20);
+      // Scan for the target AP to learn its channel/BSSID/RSSI, then connect forcing
+      // that exact channel+BSSID.
+      bool seen = false; int32_t ch = 0, rssi = 0; uint8_t bssid[6] = {0}; uint8_t enc = 255;
+      int found = WiFi.scanNetworks(false, true);
+      for (int i = 0; i < found; i++) {
+        if (WiFi.SSID(i) == String(ssid)) {
+          seen = true; ch = WiFi.channel(i); rssi = WiFi.RSSI(i);
+          enc = (uint8_t)WiFi.encryptionType(i); // 3=WPA2_PSK 6=WPA3 7=WPA2/WPA3-mixed
+          memcpy(bssid, WiFi.BSSID(i), 6);
+          break;
+        }
+      }
+      WiFi.scanDelete();
+      for (int tryn = 0; tryn < 4 && WiFi.status() != WL_CONNECTED; tryn++) {
+        WiFi.disconnect(true, true);
+        delay(200);
+        esp_wifi_set_max_tx_power(34); // low TX -- avoid RF saturation at -37 dBm
+        // Populate Arduino's STA config without connecting, then DISABLE PMF: arduino-
+        // esp32 2.0.17 sets pmf_cfg.capable=true, and a router with broken optional-PMF
+        // handling never completes auth (reason-2 AUTH_EXPIRE) -- nina-fw (idf 3.3, no
+        // PMF) connects fine. Force plain WPA2-PSK to the exact AP, then connect.
+        if (seen) WiFi.begin(ssid, pass, ch, bssid, false);
+        else WiFi.begin(ssid, pass, 0, nullptr, false);
+        wifi_config_t cfg = {};
+        esp_wifi_get_config(WIFI_IF_STA, &cfg);
+        cfg.sta.pmf_cfg.capable = false;
+        cfg.sta.pmf_cfg.required = false;
+        cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+        cfg.sta.scan_method = WIFI_FAST_SCAN;
+        if (seen) {
+          cfg.sta.channel = ch;
+          cfg.sta.bssid_set = true;
+          memcpy(cfg.sta.bssid, bssid, 6);
+        }
+        esp_wifi_set_config(WIFI_IF_STA, &cfg);
+        esp_wifi_connect();
+        uint32_t t = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - t < 5000) delay(100);
+      }
+      // bring UART0 back up to talk to the K210
+      Serial.setRxBufferSize(4096);
+      Serial.begin(LINK_BAUD);
+      Serial.setDebugOutput(false);
+      delay(30);
       if (WiFi.status() == WL_CONNECTED) {
         IPAddress ip = WiFi.localIP();
         uint8_t b[4] = {ip[0], ip[1], ip[2], ip[3]};
         sendFrame('I', b, 4);
       } else {
-        uint8_t st = (uint8_t)WiFi.status(); // report why (1=NO_SSID 4=FAIL 6=DISCONN)
-        sendFrame('E', &st, 1);
+        // status + payload checksum + parsed lengths + the disconnect REASON code
+        // (15=4way-handshake-timeout=wrong pass, 201=no-AP, 2/15/204=auth, ...).
+        uint16_t cs = 0;
+        for (uint16_t i = 0; i < len; i++) cs += pl[i];
+        uint8_t r[11] = {(uint8_t)WiFi.status(), (uint8_t)(cs & 0xff),
+                         (uint8_t)(cs >> 8), (uint8_t)sl, (uint8_t)pn, lastDiscReason,
+                         (uint8_t)(seen ? 1 : 0), (uint8_t)ch, (uint8_t)(int8_t)rssi, enc,
+                         gotAssoc};
+        sendFrame('E', r, 11);
       }
       break;
     }
