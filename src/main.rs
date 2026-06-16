@@ -103,7 +103,12 @@ fn le32(out: &mut [u8], v: u32) {
     out[3] = (v >> 24) as u8;
 }
 
-const HTML: &[u8] = b"<!doctype html><html><head><meta http-equiv=\"refresh\" content=\"2\"><title>K210 cam</title></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera</h2><img src=\"/cam.bmp\" style=\"width:640px;image-rendering:auto\"><p>OV2640 160x120 over DVP, served live by the onboard ESP32 (nina-fw). SPI0 time-multiplexed; frame captured + network recovered between requests.</p></body></html>";
+// The image reloads itself via JS (cache-busted, retry-on-error) instead of a
+// whole-page <meta refresh>: each /cam.bmp triggers a ~5 s capture+recovery during
+// which the board refuses connections, and a page-level refresh that lands in that
+// window would error out to a dead page with no way to retry. The JS loop just
+// re-requests the <img> on both load and error, so recovery gaps never stall it.
+const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera</h2><div><img id=\"c\" style=\"width:640px\"></div><p id=\"s\">connecting...</p><p>OV2640 160x120 over DVP, served live by the onboard ESP32 (nina-fw). SPI0 time-multiplexed; frame captured + network recovered between requests (~6-8s/frame).</p><script>var n=0;function L(){var i=document.getElementById('c');i.onload=function(){n++;document.getElementById('s').textContent='frame '+n;setTimeout(L,300)};i.onerror=function(){setTimeout(L,1500)};i.src='/cam.bmp?'+Date.now()}L()</script></body></html>";
 
 fn sysctl() -> *const pac::sysctl::RegisterBlock {
     pac::SYSCTL::ptr()
@@ -421,7 +426,7 @@ fn main() -> ! {
                 put_dec(unsafe { DBG_STATE } as u32);
                 putc(b'\n');
             } else {
-                let mut resp = [0u8; 700];
+                let mut resp = [0u8; 1024];
                 let mut hn = 0;
                 hn += append(&mut resp, hn, b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ");
                 hn += write_dec(&mut resp[hn..], HTML.len() as u32);
