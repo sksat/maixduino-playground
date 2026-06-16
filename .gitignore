@@ -13,3 +13,6 @@ __pycache__/
 
 # WiFi credentials (local only, never committed)
 /wifi_creds.env
+
+# ESP32 raw flash dump (the .gz is committed instead)
+/esp32-firmware/*.bin
