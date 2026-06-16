@@ -259,8 +259,8 @@ fn wifi_connect(buf: &mut [u8], lens: &mut [usize]) -> u8 {
     );
     let mut stt = 0u8;
     let mut t = 0;
-    while t < 20 {
-        nina::sleep_ms(500);
+    while t < 40 {
+        nina::sleep_ms(250);
         let n = nina::request(nina::CMD_GET_CONN_STATUS, &[], buf, lens);
         stt = if n >= 1 { buf[0] } else { 0xff };
         if stt == nina::WL_CONNECTED {
@@ -446,18 +446,21 @@ fn main() -> ! {
                 // the ESP32. Doing it here -- between requests, on a connection we've
                 // already closed -- keeps every actual serve on a healthy network.
                 capture(&dvp);
-                // Recover the wedged network. The reconnect is flaky (~1/3 of EN-reset
-                // attempts don't reach WL_CONNECTED in time), so retry until it sticks
-                // -- otherwise we'd serve a dead 0.0.0.0 link until the next request.
+                // Recover the wedged network. Only a full ESP32 EN-reset clears it:
+                // recreating the socket, re-associating without reset, and a too-short
+                // boot wait all leave the network dead or thrash (all tested). The
+                // capture's get_image -- not the pad-mux flip -- is what wedges it
+                // (the camera data on the shared SPI0 pads). Retry until associated
+                // (the reconnect flakes ~1/3 of the time -> conn=6 / IP 0.0.0.0).
                 let mut st = 0u8;
                 let mut tries = 0u32;
                 while st != nina::WL_CONNECTED && tries < 8 {
-                    nina::init(); // EN-reset the ESP32 out of its wedged state
+                    nina::init(); // full re-init (GPIO + SPI0 + EN-reset); reset_esp alone isn't enough
                     st = wifi_connect(&mut buf, &mut lens);
                     tries += 1;
                 }
                 listen = start_server(&mut buf, &mut lens);
-                nina::sleep_ms(800); // let the reconnected link settle (ARP/AP relearn)
+                nina::sleep_ms(800);
                 puts(b"recover conn=");
                 put_dec(st as u32);
                 puts(b" tries=");

@@ -175,12 +175,18 @@ pub fn init() {
             .modify(|_, w| w.ie_en().set_bit().st().set_bit().pu().set_bit().pd().clear_bit());
     }
     spi_init();
+    reset_esp(2000);
+}
 
+/// Pulse EN to reboot the ESP32 into nina-fw, then wait `boot_ms` for it to come up.
+/// GPIO/SPI0 must already be configured (init does that once). Used by recovery to
+/// clear the DVP-capture network wedge with a tunable boot wait.
+pub fn reset_esp(boot_ms: u64) {
     gpo(CS, true);
     gpo(EN, false);
     delay(20_000_000);
     gpo(EN, true);
-    sleep_ms(2000); // nina-fw boot
+    sleep_ms(boot_ms);
 }
 
 /// One send+receive; returns (nparams, framing_valid). `send_wide`/`recv_wide`
