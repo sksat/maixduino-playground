@@ -10,3 +10,6 @@ __pycache__/
 
 # Camera captures (local only, not committed)
 /captures/
+
+# WiFi credentials (local only, never committed)
+/wifi_creds.env

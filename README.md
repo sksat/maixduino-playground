@@ -12,8 +12,15 @@
   → XCLK 分周を 3→7 に下げて解決。DVP には**キャッシュ有りアドレス**を渡し CPU は**無しエイリアス
   (0x4000_0000)**で読む。DVP/SCCB ドライバは [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff)
   から移植。
-- **ESP32（オンボード WiFi）— WiFi スキャン (step 3, nina-fw over 内蔵SPI0)**（現 `src/main.rs` +
-  [src/nina.rs](src/nina.rs)）: ESP32 を nina-fw コマンドで叩いて**周辺の WiFi AP を列挙**（接続なし・認証情報不要）。
+- **ESP32（オンボード WiFi）— AP 接続 (step 4, nina-fw over 内蔵SPI0)**（現 `src/main.rs` +
+  [src/nina.rs](src/nina.rs)）: `SET_PASSPHRASE`(0x11) で SSID/パスを送り、`GET_CONN_STATUS`(0x20) を
+  ポーリングして `WL_CONNECTED(3)` を待ち、`GET_IPADDR`(0x21) で**割り当て IP を取得**。
+  **認証情報の扱い**: `wifi_creds.env`（**.gitignore・非コミット**）に置き、[build.rs](build.rs) が読んで
+  `cargo:rustc-env` 経由でコンパイラへ、`src/main.rs` は `env!("WIFI_SSID")` で参照（[wifi_creds.env.example](wifi_creds.env.example)
+  をコピーして記入）。**SSID/パスはシリアルに一切出さない**（出力は接続ステータスと IP のみ）。ハマり: `SET_PASSPHRASE` は
+  ESP32 が WiFi 接続を開始するため**応答が遅い**→ハンドシェイクの READY 待ちを 100ms→1000ms に延長。
+- **ESP32 — WiFi スキャン (step 3, nina-fw over 内蔵SPI0)**（コミット `02c22fc` + [src/nina.rs](src/nina.rs)）:
+  ESP32 を nina-fw コマンドで叩いて**周辺の WiFi AP を列挙**（接続なし・認証情報不要）。
   `START_SCAN_NETWORKS`(0x36)→`SCAN_NETWORKS`(0x27) で SSID 一覧、`GET_IDX_RSSI`(0x32) で RSSI。実機で
   **周囲9個の AP を SSID＋RSSI(dBm) 付きで取得**。決め手は **bit-bang をやめて K210 の内蔵 SPI0(DesignWare SSI)**
   に置換したこと: 最適化なしビルドの bit-bang はクロックジッタで連続コマンドが化け・ESP32 が wedge していたが、

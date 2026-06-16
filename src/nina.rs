@@ -32,6 +32,12 @@ pub const CMD_START_SCAN_NETWORKS: u8 = 0x36;
 pub const CMD_SCAN_NETWORKS: u8 = 0x27;
 pub const CMD_GET_IDX_RSSI: u8 = 0x32;
 pub const CMD_GET_IDX_ENCT: u8 = 0x33;
+pub const CMD_SET_PASSPHRASE: u8 = 0x11; // params: SSID, passphrase
+pub const CMD_GET_CONN_STATUS: u8 = 0x20; // -> 1 byte wl_status
+pub const CMD_GET_IPADDR: u8 = 0x21; // param: dummy -> IP, subnet, gateway
+
+// wl_status_t values.
+pub const WL_CONNECTED: u8 = 3;
 
 const CLINT_MTIME: *const u64 = 0x0200_BFF8 as *const u64;
 const MTIME_HZ: u64 = 7_800_000;
@@ -93,7 +99,7 @@ fn wait_ready(want: bool, ms: u64) -> bool {
 }
 
 fn frame_begin() {
-    wait_ready(false, 100);
+    wait_ready(false, 1000); // some commands (e.g. SET_PASSPHRASE) are slow to reply
     gpo(CS, false);
     wait_ready(true, 10);
 }
