@@ -35,9 +35,20 @@ pub const CMD_GET_IDX_ENCT: u8 = 0x33;
 pub const CMD_SET_PASSPHRASE: u8 = 0x11; // params: SSID, passphrase
 pub const CMD_GET_CONN_STATUS: u8 = 0x20; // -> 1 byte wl_status
 pub const CMD_GET_IPADDR: u8 = 0x21; // param: dummy -> IP, subnet, gateway
+pub const CMD_REQ_HOST_BY_NAME: u8 = 0x34; // param: hostname -> 1 byte status
+pub const CMD_GET_HOST_BY_NAME: u8 = 0x35; // -> resolved IP (4 bytes)
+pub const CMD_GET_SOCKET: u8 = 0x3F; // -> 1 byte socket number
+pub const CMD_START_CLIENT_TCP: u8 = 0x2D; // params: ip[4], port[2 BE], sock, mode
+pub const CMD_START_SERVER_TCP: u8 = 0x28; // params: port[2 BE], sock, mode -> listen
+pub const CMD_GET_CLIENT_STATE_TCP: u8 = 0x2F; // param: sock -> 1 byte tcp state
+pub const CMD_AVAIL_DATA_TCP: u8 = 0x2B; // param: sock -> 2 bytes available
+pub const CMD_SEND_DATA_TCP: u8 = 0x44; // 16-bit params: sock, data -> sent len
+pub const CMD_GET_DATABUF_TCP: u8 = 0x45; // 16-bit params: sock, len -> data
+pub const CMD_STOP_CLIENT_TCP: u8 = 0x2E; // param: sock
 
-// wl_status_t values.
+// wl_status_t / tcp state values.
 pub const WL_CONNECTED: u8 = 3;
+pub const TCP_ESTABLISHED: u8 = 4;
 
 const CLINT_MTIME: *const u64 = 0x0200_BFF8 as *const u64;
 const MTIME_HZ: u64 = 7_800_000;
@@ -158,8 +169,16 @@ pub fn init() {
     sleep_ms(2000); // nina-fw boot
 }
 
-/// One send+receive of a nina command; returns (nparams, framing_valid).
-fn request_once(cmd: u8, params: &[&[u8]], resp: &mut [u8], lens: &mut [usize]) -> (usize, bool) {
+/// One send+receive of a nina command; returns (nparams, framing_valid). With
+/// `wide`, param lengths (both sent and received) are 16-bit big-endian instead of
+/// 8-bit — the data-transfer commands (SEND_DATA_TCP / GET_DATABUF) need that.
+fn request_once(
+    cmd: u8,
+    params: &[&[u8]],
+    resp: &mut [u8],
+    lens: &mut [usize],
+    wide: bool,
+) -> (usize, bool) {
     // send: E0 <cmd> <nparams> [<len><data>..] EE, padded to a multiple of 4
     frame_begin();
     xfer(START);
@@ -167,8 +186,14 @@ fn request_once(cmd: u8, params: &[&[u8]], resp: &mut [u8], lens: &mut [usize]) 
     xfer(params.len() as u8);
     let mut sent = 3u32;
     for p in params {
-        xfer(p.len() as u8);
-        sent += 1;
+        if wide {
+            xfer((p.len() >> 8) as u8);
+            xfer((p.len() & 0xff) as u8);
+            sent += 2;
+        } else {
+            xfer(p.len() as u8);
+            sent += 1;
+        }
         for &b in *p {
             xfer(b);
             sent += 1;
@@ -201,7 +226,11 @@ fn request_once(cmd: u8, params: &[&[u8]], resp: &mut [u8], lens: &mut [usize]) 
     let nparams = xfer(0xff) as usize;
     let mut off = 0;
     for i in 0..nparams {
-        let l = xfer(0xff) as usize;
+        let l = if wide {
+            ((xfer(0xff) as usize) << 8) | (xfer(0xff) as usize)
+        } else {
+            xfer(0xff) as usize
+        };
         for _ in 0..l {
             let b = xfer(0xff);
             if off < resp.len() {
@@ -219,13 +248,16 @@ fn request_once(cmd: u8, params: &[&[u8]], resp: &mut [u8], lens: &mut [usize]) 
     (nparams, valid)
 }
 
-/// Send a nina command and read the reply, retrying a few times if the framing
-/// doesn't validate (cheap insurance; the hardware SPI should rarely need it). The
-/// reads here are idempotent. Returns the number of reply params (0 on failure).
-pub fn request(cmd: u8, params: &[&[u8]], resp: &mut [u8], lens: &mut [usize]) -> usize {
+fn request_impl(
+    cmd: u8,
+    params: &[&[u8]],
+    resp: &mut [u8],
+    lens: &mut [usize],
+    wide: bool,
+) -> usize {
     let mut attempt = 0;
     while attempt < 8 {
-        let (n, valid) = request_once(cmd, params, resp, lens);
+        let (n, valid) = request_once(cmd, params, resp, lens, wide);
         if valid {
             unsafe { RETRIES = attempt };
             return n;
@@ -235,4 +267,15 @@ pub fn request(cmd: u8, params: &[&[u8]], resp: &mut [u8], lens: &mut [usize]) -
     }
     unsafe { RETRIES = attempt };
     0
+}
+
+/// Send a nina command and read the reply (8-bit param lengths), retrying a few
+/// times if the framing doesn't validate. Returns the number of reply params.
+pub fn request(cmd: u8, params: &[&[u8]], resp: &mut [u8], lens: &mut [usize]) -> usize {
+    request_impl(cmd, params, resp, lens, false)
+}
+
+/// Like `request` but with 16-bit param lengths, for the TCP data commands.
+pub fn request_wide(cmd: u8, params: &[&[u8]], resp: &mut [u8], lens: &mut [usize]) -> usize {
+    request_impl(cmd, params, resp, lens, true)
 }

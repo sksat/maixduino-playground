@@ -12,7 +12,15 @@
   → XCLK 分周を 3→7 に下げて解決。DVP には**キャッシュ有りアドレス**を渡し CPU は**無しエイリアス
   (0x4000_0000)**で読む。DVP/SCCB ドライバは [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff)
   から移植。
-- **ESP32（オンボード WiFi）— AP 接続 (step 4, nina-fw over 内蔵SPI0)**（現 `src/main.rs` +
+- **ESP32（オンボード WiFi）— HTTP サーバ (step 6)**（現 `src/main.rs` + [src/nina.rs](src/nina.rs)）:
+  WiFi 接続後、ポート80で待受し **ブラウザ/curl に HTML ページをサーブ**。実機で同一LANのホストから
+  `curl http://192.168.0.7/` → `HTTP/1.1 200 OK`＋HTML を取得（`served sock 1 req 75B`＝実HTTPリクエストを
+  パース）。nina サーバモデル: `GET_SOCKET`→`START_SERVER_TCP`(0x28) で待受、`AVAIL_DATA_TCP` を
+  **2パラメータ `[listen_sock, accept=1]`** で呼ぶと**クライアントソケット番号**が返る（255=なし）→
+  そのソケットで `GET_DATABUF`/`SEND_DATA`/`STOP`。レスポンスは `Content-Length` 付きでクリーンにクローズ。
+  TCP データ転送は **16ビット長パラメータ**（`request_wide`）。**既知の制限**: nina-fw 1.2.2 では1接続を
+  さばくと待受ソケットが次を accept しない（persistent も fresh も同症状）→ 連続リクエストは要追加調査。
+- **ESP32（オンボード WiFi）— AP 接続 (step 4, nina-fw over 内蔵SPI0)**（コミット `9b4b84c` +
   [src/nina.rs](src/nina.rs)）: `SET_PASSPHRASE`(0x11) で SSID/パスを送り、`GET_CONN_STATUS`(0x20) を
   ポーリングして `WL_CONNECTED(3)` を待ち、`GET_IPADDR`(0x21) で**割り当て IP を取得**。
   **認証情報の扱い**: `wifi_creds.env`（**.gitignore・非コミット**）に置き、[build.rs](build.rs) が読んで
