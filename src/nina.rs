@@ -43,6 +43,7 @@ pub const CMD_START_SERVER_TCP: u8 = 0x28; // params: port[2 BE], sock, mode -> 
 pub const CMD_GET_CLIENT_STATE_TCP: u8 = 0x2F; // param: sock -> 1 byte tcp state
 pub const CMD_AVAIL_DATA_TCP: u8 = 0x2B; // param: sock -> 2 bytes available
 pub const CMD_SEND_DATA_TCP: u8 = 0x44; // 16-bit params: sock, data -> sent len
+pub const CMD_DATA_SENT_TCP: u8 = 0x2A; // param: sock -> 1 when the data has flushed
 pub const CMD_GET_DATABUF_TCP: u8 = 0x45; // 16-bit params: sock, len -> data
 pub const CMD_STOP_CLIENT_TCP: u8 = 0x2E; // param: sock
 
@@ -123,6 +124,12 @@ fn frame_begin() {
 }
 fn frame_end() {
     gpo(CS, true);
+}
+
+/// Re-configure SPI0 as the nina master after something else (the camera/DVP) has
+/// taken over SPI0. Does NOT reset the ESP32, so the WiFi connection is kept.
+pub fn spi_reinit() {
+    spi_init();
 }
 
 /// Configure SPI0 (mode 0, full duplex, 8-bit) and select its (unused) SS0.
