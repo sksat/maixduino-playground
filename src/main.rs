@@ -16,7 +16,7 @@ mod uart_wifi;
 
 use panic_halt as _;
 
-use dvp::{ov2640_init, ov2640_read_id, ov2640_rgb565_qqvga, Dvp, ImageFormat};
+use dvp::{ov2640_init, ov2640_read_id, Dvp, ImageFormat};
 use k210_hal::fpioa;
 use k210_hal::pac;
 use k210_hal::prelude::*;
@@ -25,12 +25,15 @@ use riscv_rt::entry;
 const UARTHS_TXDATA: *mut u32 = 0x3800_0000 as *mut u32;
 const UNCACHED_OFFSET: usize = 0x4000_0000;
 const BAUD: u32 = 115_200;
-const LINK_BAUD: u32 = 921_600;
+const LINK_BAUD: u32 = 3_000_000; // exact K210 divisor (195MHz/48 = 4.0625); UART is the
+                                  // image-transfer bottleneck, so 3M ~halves QVGA frame
+                                  // time. (Earlier 3M truncation was the ESP32 WiFiClient
+                                  // EWOULDBLOCK-closes-socket bug, since fixed.)
 const WIFI_SSID: &str = env!("WIFI_SSID");
 const WIFI_PASS: &str = env!("WIFI_PASS");
 
-const W: usize = 160; // QQVGA
-const H: usize = 120;
+const W: usize = 320; // QVGA (the OV2640 baseline; 4x the pixels of QQVGA)
+const H: usize = 240;
 
 #[repr(C, align(64))]
 struct Frame {
@@ -103,7 +106,7 @@ fn le32(out: &mut [u8], v: u32) {
 
 // The <img> reloads itself via JS (cache-busted) on load+error. Over UART there is no
 // capture/recovery gap, so the reload cadence is just "as fast as a frame serves".
-const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><img id=\"c\" style=\"width:640px\"></div><p id=\"s\">connecting...</p><p>OV2640 160x120 over DVP, served live by the onboard ESP32 (nina-fw over UART). The camera no longer shares SPI0 with WiFi, so every request captures and serves a fresh frame.</p><script>var n=0,t0=Date.now();function L(){var i=document.getElementById('c');i.onload=function(){n++;var f=(n*1000/(Date.now()-t0)).toFixed(2);document.getElementById('s').textContent='frame '+n+'  ('+f+' fps)';setTimeout(L,50)};i.onerror=function(){setTimeout(L,800)};i.src='/cam.bmp?'+Date.now()}L()</script></body></html>";
+const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><img id=\"c\" style=\"width:640px\"></div><p id=\"s\">connecting...</p><p>OV2640 320x240 over DVP, served live by the onboard ESP32 (nina-fw over UART @ 1.5 Mbaud). The camera no longer shares SPI0 with WiFi, so every request captures and serves a fresh frame.</p><script>var n=0,t0=Date.now();function L(){var i=document.getElementById('c');i.onload=function(){n++;var f=(n*1000/(Date.now()-t0)).toFixed(2);document.getElementById('s').textContent='frame '+n+'  ('+f+' fps)';setTimeout(L,50)};i.onerror=function(){setTimeout(L,800)};i.src='/cam.bmp?'+Date.now()}L()</script></body></html>";
 
 fn sysctl() -> *const pac::sysctl::RegisterBlock {
     pac::SYSCTL::ptr()
@@ -239,8 +242,7 @@ fn main() -> ! {
     let dvp = Dvp::new(p.DVP);
     dvp.init();
     let _ = ov2640_read_id(&dvp);
-    ov2640_init(&dvp);
-    ov2640_rgb565_qqvga(&dvp);
+    ov2640_init(&dvp); // baseline config IS 320x240 RGB565 (no QQVGA delta = QVGA)
     dvp.set_image_format(ImageFormat::RGB);
     dvp.set_image_size(false, W as u16, H as u16);
     let cached = unsafe { core::ptr::addr_of!(FRAME.px) } as *const u32 as usize;

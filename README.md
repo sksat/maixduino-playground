@@ -14,10 +14,13 @@
   から移植。
 - **カメラ映像を WiFi で配信する Web サーバ (step 8 = ゴール・ライブ版、WiFi を UART に逃がして高速化)**
   （現 `src/main.rs` + [src/dvp.rs](src/dvp.rs) + [src/uart_wifi.rs](src/uart_wifi.rs) +
-  [esp32-modem-ninafw/](esp32-modem-ninafw/)）: ブラウザ/curl で K210 にアクセスすると**ネイティブ 160×120 の
-  24bit BMP（57654B）を毎リクエスト撮り直してライブ配信**。実機で**約 654ms/枚（≈1.5fps）が連続で安定**
-  （同一LANのホストから `curl http://192.168.0.7/cam.bmp`、実写真を確認）。
-  旧 SPI 版（下の step 7）の **~6–8s/枚 から約10倍**速くなった。
+  [esp32-modem-ninafw/](esp32-modem-ninafw/)）: ブラウザ/curl で K210 にアクセスすると**QVGA 320×240 の
+  24bit BMP（230454B）を毎リクエスト撮り直してライブ配信**。実機で**約 1.0s/枚（フル 230KB 完走）が連続で安定**
+  （同一LANのホストから `curl http://192.168.0.7/cam.bmp`、実写真を確認）。旧 SPI 版（下の step 7）は
+  160×120 で ~6–8s/枚だったので、**解像度4倍かつ 6〜8倍速**。**UART リンクが律速**なので
+  （230KB ÷ 3Mbaud ≒ 0.77s が下限）、**3 Mbaud**（K210 分周 195MHz/48=4.0625 ちょうど）まで上げた。
+  QQVGA 160×120 なら ~0.65s/枚。撮影画像には DVP 由来の横縞＋ごま塩ノイズ（この基板の DVP 信号品質の限界、
+  step「UXGA JPEG」参照）が乗るが、転送はバイト正確（BMP はフル）。
   **効いた一手＝WiFi を SPI0 から UART に逃がした**こと。旧版の遅さは「カメラ(DVP)と WiFi(nina) が両方 SPI0 を
   使い、撮影が ESP32 のネットを壊す→撮影ごとに EN リセット＋再接続(~5s)」が原因だった。**ESP32 を UART
   modem 化**すれば WiFi はカメラと無関係な IO6/IO7 を通るので、撮影がネットを壊さない＝復旧ダンスが丸ごと消え、
@@ -30,9 +33,12 @@
   トランスポートだけ SPI(SPIS)→UART0 に差し替え**たのが [esp32-modem-ninafw/](esp32-modem-ninafw/)。
   ビルドの罠: **idf v3.3 は gcc 5.2.0 ツールチェーンと対**で、新しい 8.2.0/esp-2019r2 を使うと newlib
   ヘッダ世代がズレて C++(cxx/asio)が `__result_use_check`/`_EXFUN` で全コケする（→ 5.2.0 を使う）。
-  K210 側 [src/uart_wifi.rs](src/uart_wifi.rs) は UART1 を 16550 直叩き(921600)して modem プロトコル
-  (`P`ing/`C`onnect/`L`isten/`A`ccept/`R`ecv/`S`end/`X`close)。**フロー制御は ESP32 の `client.write()` が
-  lwip 受理までブロックする**ので、各送信への `S` 応答がそのまま律速＝旧 nina 版の「無音ダンス」が不要。
+  K210 側 [src/uart_wifi.rs](src/uart_wifi.rs) は UART1 を 16550 直叩き(3Mbaud)して modem プロトコル
+  (`P`ing/`C`onnect/`L`isten/`A`ccept/`R`ecv/`S`end/`X`close)。**もう一つの罠＝nina-fw の `WiFiClient::write`
+  は `lwip_send(MSG_DONTWAIT)` 一発で、送信バッファ満杯(`EWOULDBLOCK`)を致命扱いして**ソケットを閉じてしまう**。
+  QQVGA(57KB)は遅くて踏まなかったが、QVGA(230KB)を速く流すと途中でソケットが死んで切れる。`select` で書込可能まで
+  待って全バイト送る実装に直した（`wificlient-blocking-write.patch`）。これで**フロー制御は `client.write()` の
+  ブロックそのもの**＝各 `S` 応答が律速になり、旧 nina(SPI)版の「無音ダンス」も不要。
   認証情報の扱いは step 4 と同じ（`wifi_creds.env` 非コミット→build.rs→`env!`、SSID/パスはシリアルに出さず IP のみ）。
 - **【旧】カメラ映像 WiFi 配信 Web サーバ (step 7 = ゴール初達成、SPI 版)**（コミット `e6589e8`・タグ
   `nina-spi-camera-webserver`、[src/nina.rs](src/nina.rs) は資産として残置・`restore-nina-fw.sh` で SPI に戻せる）:

@@ -30,7 +30,11 @@ extern "C" {
 }
 
 static const int      LINK_UART = UART_NUM_0;       // GPIO1/3 -> K210 IO6/IO7
-static const uint32_t LINK_BAUD = 921600;
+static const uint32_t LINK_BAUD = 3000000; // 3 Mbaud (exact K210 divisor 4.0625). UART
+                                           // is the image-transfer bottleneck, so this
+                                           // ~halves QVGA frame time vs 1.5M. (The earlier
+                                           // 3M truncation was the WiFiClient EWOULDBLOCK
+                                           // bug, since fixed -- not a baud problem.)
 static const uint16_t MAXPL     = 1600;
 
 static WiFiServer server(80);
@@ -46,7 +50,7 @@ static void uartInit() {
   cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
   uart_param_config((uart_port_t)LINK_UART, &cfg);
   // keep UART0's default pins (GPIO1 TX / GPIO3 RX)
-  uart_driver_install((uart_port_t)LINK_UART, 4096, 0, 0, NULL, 0);
+  uart_driver_install((uart_port_t)LINK_UART, 8192, 0, 0, NULL, 0);
 }
 
 static inline void uartWrite(const uint8_t *b, size_t n) {

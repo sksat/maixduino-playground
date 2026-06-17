@@ -21,10 +21,18 @@ result.)
 
 ## What changed vs stock nina-fw
 
-Only `main/sketch.ino.cpp` (this dir's copy) — the SPIS transport + Arduino-NINA
-`CommandHandler` are replaced by `setup()`/`loop()` that speak the modem protocol over
-UART0 using nina-fw's own WiFi library (`WiFi`/`WiFiServer`/`WiFiClient`).
-`main/CommandHandler.cpp` is dropped from the build.
+Two changes vs stock nina-fw:
+1. `main/sketch.ino.cpp` (this dir's copy) — the SPIS transport + Arduino-NINA
+   `CommandHandler` are replaced by `setup()`/`loop()` that speak the modem protocol
+   over UART0 (3 Mbaud) using nina-fw's own WiFi library. `main/CommandHandler.cpp` is
+   dropped from the build.
+2. `wificlient-blocking-write.patch` (apply to `arduino/libraries/WiFi/src/WiFiClient.cpp`)
+   — stock `WiFiClient::write` does one `lwip_send_r(MSG_DONTWAIT)` and treats any
+   `result<0` as fatal, so a full lwip send buffer (`EWOULDBLOCK`) **closes the socket
+   mid-transfer**. Harmless for tiny SPI replies, but a fast producer streaming a 230 KB
+   QVGA frame trips it -> truncated response. The patch makes `write` send all bytes,
+   waiting on `select` (yields until writable) on backpressure and only closing on a
+   real error. Required for QVGA-and-larger frames.
 
 Protocol (matches the K210's unchanged `src/uart_wifi.rs`), framing
 `<tag:1><len:2 LE><payload>`, replies prefixed `AA 55` for resync:
@@ -39,7 +47,8 @@ Protocol (matches the K210's unchanged `src/uart_wifi.rs`), framing
 | `S` send | bytes | `S`+sent[2 LE] |
 | `X` close | — | `O` |
 
-Status: **works** — associates over UART, pulls DHCP (`IP 192.168.0.7`), ping 6/6.
+Status: **works** — associates over UART, pulls DHCP (`IP 192.168.0.7`), ping 6/6, and
+serves a live QVGA (320×240) camera stream at ~1.0 s/frame (full 230 KB frames, 3 Mbaud).
 
 ## Build
 
@@ -54,7 +63,9 @@ get-started docs pin) — or move to idf v3.3.1+, which bumped both together.
 export IDF_PATH=~/esp/esp-idf-v3.3
 export PATH="$HOME/esp/xtensa-esp32-elf-520/bin:$HOME/esp/idf38/bin:$HOME/.local/bin:$PATH"
 # copy this dir's sketch.ino.cpp over nina-fw's main/sketch.ino.cpp,
-# and move main/CommandHandler.cpp out of the build, then:
+# move main/CommandHandler.cpp out of the build,
+# and apply the WiFiClient fix, then build:
+git -C "$IDF_NINAFW" apply /path/to/esp32-modem-ninafw/wificlient-blocking-write.patch
 make -j"$(nproc)"
 ```
 

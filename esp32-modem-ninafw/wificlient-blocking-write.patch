@@ -1,0 +1,43 @@
+diff --git a/arduino/libraries/WiFi/src/WiFiClient.cpp b/arduino/libraries/WiFi/src/WiFiClient.cpp
+index 9dc06be..e0b6f54 100644
+--- a/arduino/libraries/WiFi/src/WiFiClient.cpp
++++ b/arduino/libraries/WiFi/src/WiFiClient.cpp
+@@ -86,15 +86,30 @@ size_t WiFiClient::write(const uint8_t *buf, size_t size)
+     return 0;
+   }
+ 
+-  int result = lwip_send_r(_socket, (void*)buf, size, MSG_DONTWAIT);
+-
+-  if (result < 0) {
+-    lwip_close_r(_socket);
+-    _socket = -1;
+-    return 0;
++  // Send ALL of `buf`, blocking on TCP backpressure instead of dying on it. The
++  // stock nina-fw used a single MSG_DONTWAIT send and treated result<0 as fatal --
++  // but a full lwip send buffer returns EWOULDBLOCK, so a fast producer (e.g. the
++  // K210 streaming a 230 KB QVGA frame faster than WiFi drains) would get the socket
++  // CLOSED mid-transfer -> truncated response. Here EWOULDBLOCK just waits (via
++  // select, which yields until the socket is writable) and only a real error closes.
++  size_t sent = 0;
++  while (sent < size) {
++    int result = lwip_send_r(_socket, (void*)(buf + sent), size - sent, MSG_DONTWAIT);
++    if (result > 0) {
++      sent += result;
++    } else if (result < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
++      fd_set wfds;
++      FD_ZERO(&wfds);
++      FD_SET(_socket, &wfds);
++      struct timeval tv = { 0, 50000 }; // 50 ms; returns as soon as writable
++      lwip_select(_socket + 1, NULL, &wfds, NULL, &tv);
++    } else {
++      lwip_close_r(_socket);
++      _socket = -1;
++      return sent;
++    }
+   }
+-
+-  return result;
++  return sent;
+ }
+ 
+ int WiFiClient::available()
