@@ -38,7 +38,16 @@ Flash the app with `../esp32-firmware/flash-esp32.sh .pio/build/esp32dev/firmwar
 `../esp32-firmware/hold_gpio0_high.py` while the K210 boots so the EN pulse boots the
 app (the flash can leave GPIO0 latched low = download mode).
 
-## STATUS: ping works, WiFi connect is BLOCKED
+## STATUS: this generic build can't associate — solved in ../esp32-modem-ninafw
+
+**Resolution:** this firmware (generic arduino-esp32) is a dead end for WiFi on this
+module, kept here as the negative result. The fix is `../esp32-modem-ninafw/` — nina-fw
+(idf 3.3) with this same UART protocol; it associates and pulls DHCP over UART.
+Confirmed it's the **idf-version WiFi/PHY blobs**, not the connect path: even a
+byte-for-byte nina-fw-equivalent minimal connect here (no forced ch/BSSID, no
+threshold, PMF off, default protocol/country/TX-power — see the current `src/main.cpp`)
+still gives reason-2 AUTH_EXPIRE / assoc=0, identical on idf 4.4 AND 5.5. PHY init data
+is the same default blob in both, so the earlier "NINA PHY blob" theory was wrong.
 
 Proven: K210↔ESP32 UART link (ping 6/6 @ 921600), camera-independent. The UART link
 and the whole modem protocol work.

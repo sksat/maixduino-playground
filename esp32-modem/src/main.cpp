@@ -60,14 +60,12 @@ void setup() {
   WiFi.onEvent(onWiFiEvent);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
-  // allow ch 1-13 (Japan/world); the default US region (ch 1-11) can't associate to
-  // an AP on ch 12/13 even though the scan finds it.
-  esp_wifi_set_country_code("JP", true);
-  // Force legacy 11b/g (no 11n/HT). idf 4.4 advertises HT caps that some routers
-  // reject during association -> reason-2 AUTH_EXPIRE with assoc never completing,
-  // while nina-fw (idf 3.3) associates fine.
-  esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G);
-  esp_wifi_set_max_tx_power(34); // low TX -- avoid RF saturation at the very close AP
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  // NOTE: deliberately NO country/protocol/tx-power overrides here. The earlier
+  // build forced ch1-13 country, 11b/g-only (no 11n) and a low TX cap trying to fix
+  // a reason-2 AUTH_EXPIRE -- but those are exactly the deltas vs nina-fw (idf 3.3),
+  // which associates with NONE of them. This build tests the minimal nina-equivalent
+  // path: stock defaults (11bgn, world country, default TX) + a plain WiFi.begin.
   delay(50);
   // ready marker so the K210 can sync past the ROM boot noise
   Serial.write((const uint8_t *)"\xAA\x55MDM1\n", 7);
@@ -107,59 +105,46 @@ void loop() {
       uint16_t pn = len - pl_off; if (pn > 79) pn = 79;
       memcpy(pass, pl + pl_off, pn); pass[pn] = 0;
       lastDiscReason = 0; gotAssoc = 0;
-      WiFi.setAutoReconnect(true);
-      // The live UART0 peripheral interferes with WiFi association on the ESP32 (a
-      // documented cause of reason-2 AUTH_EXPIRE: "ESP32 + hardware UART = auth
-      // expired"). Our UART0 is the K210 link -- so QUIET it during scan+connect, then
-      // bring it back up to reply. The K210 is just waiting for the reply meanwhile.
+      // Quiet UART0 (the K210 link) during connect; the K210 just waits for the reply.
       Serial.flush();
       Serial.end();
       delay(20);
-      // Scan for the target AP to learn its channel/BSSID/RSSI, then connect forcing
-      // that exact channel+BSSID.
-      bool seen = false; int32_t ch = 0, rssi = 0; uint8_t bssid[6] = {0}; uint8_t enc = 255;
-      int found = WiFi.scanNetworks(false, true);
-      for (int i = 0; i < found; i++) {
-        if (WiFi.SSID(i) == String(ssid)) {
-          seen = true; ch = WiFi.channel(i); rssi = WiFi.RSSI(i);
-          enc = (uint8_t)WiFi.encryptionType(i); // 3=WPA2_PSK 6=WPA3 7=WPA2/WPA3-mixed
-          memcpy(bssid, WiFi.BSSID(i), 6);
-          break;
-        }
-      }
-      WiFi.scanDelete();
-      for (int tryn = 0; tryn < 4 && WiFi.status() != WL_CONNECTED; tryn++) {
-        WiFi.disconnect(true, true);
-        delay(200);
-        esp_wifi_set_max_tx_power(34);
-        // Populate+start the STA via WiFi.begin (keeps arduino's state machine in
-        // sync) but DON'T connect yet, then strip every idf-4.x capability IE the
-        // router might reject during association (802.11k rm / 802.11v btm / MBO /
-        // PMF / SAE) -- the likely cause of assoc never completing while nina-fw
-        // (idf 3.3, none of these) associates fine -- and connect.
-        if (seen) WiFi.begin(ssid, pass, ch, bssid, false);
-        else WiFi.begin(ssid, pass, 0, nullptr, false);
-        wifi_config_t cfg = {};
-        esp_wifi_get_config(WIFI_IF_STA, &cfg);
+      // RAW esp_wifi connect, byte-for-byte nina-fw's config (idf 3.3) -- but with PMF
+      // EXPLICITLY disabled. arduino-3.x's WiFi.begin defaults pmf_cfg.capable=true and
+      // threshold.authmode=WPA2_PSK; nina-fw (idf 3.3) has NO PMF at all. This is the
+      // last behavioral delta left after the minimal WiFi.begin test still gave
+      // reason-2 AUTH_EXPIRE. WiFi.mode(STA) in setup() already brought up
+      // netif+event+esp_wifi_start, so we drive esp_wifi directly here.
+      esp_wifi_disconnect();
+      delay(100);
+      {
+        wifi_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        strncpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid));
+        strncpy((char *)cfg.sta.password, pass, sizeof(cfg.sta.password));
         cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
-        cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
-        cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-        cfg.sta.pmf_cfg.capable = false;
+        cfg.sta.threshold.authmode = WIFI_AUTH_OPEN; // 0 = no minimum (like nina-fw)
+        cfg.sta.pmf_cfg.capable = false;             // <-- the delta vs arduino default
         cfg.sta.pmf_cfg.required = false;
-        cfg.sta.rm_enabled = 0;
-        cfg.sta.btm_enabled = 0;
-        cfg.sta.mbo_enabled = 0;
-        cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_UNSPECIFIED;
-        cfg.sta.listen_interval = 1;
-        if (seen) {
-          cfg.sta.channel = ch;
-          cfg.sta.bssid_set = true;
-          memcpy(cfg.sta.bssid, bssid, 6);
-        }
         esp_wifi_set_config(WIFI_IF_STA, &cfg);
-        esp_wifi_connect();
-        uint32_t t = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - t < 5000) delay(100);
+      }
+      esp_wifi_set_ps(WIFI_PS_NONE);
+      esp_wifi_connect();
+      uint32_t t = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - t < 20000) delay(100);
+      // Only if it FAILED, scan to fill the diagnostic fields (post-connect, so the
+      // scan can't perturb the connect attempt itself).
+      bool seen = false; int32_t ch = 0, rssi = 0; uint8_t enc = 255;
+      if (WiFi.status() != WL_CONNECTED) {
+        int found = WiFi.scanNetworks(false, true);
+        for (int i = 0; i < found; i++) {
+          if (WiFi.SSID(i) == String(ssid)) {
+            seen = true; ch = WiFi.channel(i); rssi = WiFi.RSSI(i);
+            enc = (uint8_t)WiFi.encryptionType(i);
+            break;
+          }
+        }
+        WiFi.scanDelete();
       }
       // bring UART0 back up to talk to the K210
       Serial.setRxBufferSize(4096);
