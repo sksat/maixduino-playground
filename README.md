@@ -12,23 +12,38 @@
   → XCLK 分周を 3→7 に下げて解決。DVP には**キャッシュ有りアドレス**を渡し CPU は**無しエイリアス
   (0x4000_0000)**で読む。DVP/SCCB ドライバは [laanwj/k210-sdk-stuff](https://github.com/laanwj/k210-sdk-stuff)
   から移植。
-- **カメラ映像を WiFi で配信する Web サーバ (step 7 = ゴール・達成、ライブ版)**（現 `src/main.rs` +
-  [src/dvp.rs](src/dvp.rs) + [src/nina.rs](src/nina.rs)・コミット `e6589e8`）: ブラウザ/curl で K210 に
-  アクセスすると**オンボードカメラのライブ画像**が返り、meta refresh でストリームになる。**ネイティブ 160×120 の
-  24bit BMP（57654B）を毎リクエスト撮り直して配信**（同一LANのホストから `curl http://<board>/cam.bmp`、6/6 完走）。
-  **最大の難所＝カメラ(DVP)と WiFi(nina) が両方 SPI0 を使う**こと。**カメラ撮影は ESP32 の
-  ネットワークスタックを壊す**（SPIリンクは生きていて GET_CONN_STATUS=3 なのに L2/TCP が死ぬ）ので、
-  **撮影しながら返信できない**。構成: ①今あるフレームを健全な接続で配信 → ②クライアントを閉じる →
-  ③次フレームを撮影（ネットを壊す）→ ④EN リセット＋再接続でネット復旧。返信は常に健全な接続で行われ、
-  配信フレームは1リクエスト分だけ古い。再接続はフラついて conn=6/IP=0.0.0.0 になることがあるので
-  **WL_CONNECTED まで最大8回リトライ**。**TCP フロー制御**: ESP32 の lwip 送信バッファは 4×MSS(5744B) で、
-  ESP32 の WiFi タスクが相手の ACK を処理して初めて空く。SPI を叩き続けるとそのタスクが餓えてバッファが
-  詰まり 5744B ちょうどで接続が切れる→**各 1024B 送信のあとに ~30ms の「無音」**(SPI を一切出さない)を入れて
-  ESP32 にドレイン時間を与えると 57KB を完走する（codex に検証依頼）。連続撮影で AE/AWB が収束し、
-  最初の一発撮りで出ていた緑かぶりも消える。起動時のハートビート(`.`×20)はホスト側シリアル捕捉が USB
-  ブリッジの auto-reset を越えてアタッチする猶予。[tools/bmp2png.py](tools/bmp2png.py) は numpy+zlib だけ
-  (Pillow 不要)で BMP→PNG 拡大。残課題: 1フレーム ~6-8s と遅い（撮影ごとに EN リセット＋再接続が要るため）→
-  撮影でネットを壊さない方法が見つかれば一気に速くなる。
+- **カメラ映像を WiFi で配信する Web サーバ (step 8 = ゴール・ライブ版、WiFi を UART に逃がして高速化)**
+  （現 `src/main.rs` + [src/dvp.rs](src/dvp.rs) + [src/uart_wifi.rs](src/uart_wifi.rs) +
+  [esp32-modem-ninafw/](esp32-modem-ninafw/)）: ブラウザ/curl で K210 にアクセスすると**ネイティブ 160×120 の
+  24bit BMP（57654B）を毎リクエスト撮り直してライブ配信**。実機で**約 654ms/枚（≈1.5fps）が連続で安定**
+  （同一LANのホストから `curl http://192.168.0.7/cam.bmp`、実写真を確認）。
+  旧 SPI 版（下の step 7）の **~6–8s/枚 から約10倍**速くなった。
+  **効いた一手＝WiFi を SPI0 から UART に逃がした**こと。旧版の遅さは「カメラ(DVP)と WiFi(nina) が両方 SPI0 を
+  使い、撮影が ESP32 のネットを壊す→撮影ごとに EN リセット＋再接続(~5s)」が原因だった。**ESP32 を UART
+  modem 化**すれば WiFi はカメラと無関係な IO6/IO7 を通るので、撮影がネットを壊さない＝復旧ダンスが丸ごと消え、
+  毎リクエスト新鮮なフレームを健全な接続で返せる。
+  **ESP32 側の本当の難所**: 汎用 arduino-esp32 だと**この u-blox NINA-W102 モジュールで 802.11
+  アソシエーションに失敗**（reason 2 AUTH_EXPIRE、association イベントが一度も来ない。idf 4.4 でも 5.5 でも、
+  nina-fw 等価の最小接続—ch/BSSID 固定なし・threshold なし・PMF off・既定 protocol/country/TX—でも同症状）。
+  PHY init data は両者とも既定の同じ blob なので、**犯人は idf バージョンの WiFi/PHY バイナリ blob** と切り分け
+  （codex とも一致）。→ **アソシエーションが通る唯一の firmware＝nina-fw(idf 3.3) の WiFi スタックを流用し、
+  トランスポートだけ SPI(SPIS)→UART0 に差し替え**たのが [esp32-modem-ninafw/](esp32-modem-ninafw/)。
+  ビルドの罠: **idf v3.3 は gcc 5.2.0 ツールチェーンと対**で、新しい 8.2.0/esp-2019r2 を使うと newlib
+  ヘッダ世代がズレて C++(cxx/asio)が `__result_use_check`/`_EXFUN` で全コケする（→ 5.2.0 を使う）。
+  K210 側 [src/uart_wifi.rs](src/uart_wifi.rs) は UART1 を 16550 直叩き(921600)して modem プロトコル
+  (`P`ing/`C`onnect/`L`isten/`A`ccept/`R`ecv/`S`end/`X`close)。**フロー制御は ESP32 の `client.write()` が
+  lwip 受理までブロックする**ので、各送信への `S` 応答がそのまま律速＝旧 nina 版の「無音ダンス」が不要。
+  認証情報の扱いは step 4 と同じ（`wifi_creds.env` 非コミット→build.rs→`env!`、SSID/パスはシリアルに出さず IP のみ）。
+- **【旧】カメラ映像 WiFi 配信 Web サーバ (step 7 = ゴール初達成、SPI 版)**（コミット `e6589e8`・タグ
+  `nina-spi-camera-webserver`、[src/nina.rs](src/nina.rs) は資産として残置・`restore-nina-fw.sh` で SPI に戻せる）:
+  カメラ(DVP)と WiFi(nina) が両方 SPI0 を使うため、**カメラ撮影が ESP32 のネットワークスタックを壊す**
+  （SPIリンクは生きて GET_CONN_STATUS=3 なのに L2/TCP が死ぬ）。そこで ①今あるフレームを健全な接続で配信 →
+  ②クライアントを閉じる → ③次フレームを撮影（ネットを壊す）→ ④EN リセット＋再接続で復旧、という構成で
+  返信を常に健全な接続に乗せた（配信フレームは1リクエスト古い、~6–8s/枚）。再接続はフラついて conn=6/IP=0.0.0.0
+  になることがあり **WL_CONNECTED まで最大8回リトライ**。**TCP フロー制御**: lwip 送信バッファは 4×MSS(5744B) で、
+  SPI を叩き続けると ESP32 の WiFi タスクが餓えて 5744B ちょうどで切れる→**各 1024B 送信後に ~30ms の「無音」**
+  を入れてドレインさせ 57KB を完走（codex に検証依頼）。[tools/bmp2png.py](tools/bmp2png.py) は numpy+zlib だけで
+  BMP→PNG 拡大。この「撮影がネットを壊す」制約を UART 化で外したのが上の step 8。
 - **ESP32（オンボード WiFi）— HTTP サーバ (step 6)**（コミット `444f036` + [src/nina.rs](src/nina.rs)）:
   WiFi 接続後、ポート80で待受し **ブラウザ/curl に HTML ページをサーブ**。実機で同一LANのホストから
   `curl http://192.168.0.7/` → `HTTP/1.1 200 OK`＋HTML を取得（`served sock 1 req 75B`＝実HTTPリクエストを
