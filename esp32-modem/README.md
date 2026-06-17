@@ -59,6 +59,16 @@ fresh NVS; PMF disabled (`pmf_cfg.capable/required=false` + `threshold.authmode=
 WPA2_PSK`); `esp_wifi_set_protocol(11b|11g)` (no 11n); `Serial.end()` during connect
 (the "UART interferes with WiFi" theory).
 
-Likely next steps: (a) test a different AP / phone hotspot to isolate this-router vs
-general; (b) try arduino-esp32 3.x (ESP-IDF 5.x) in case it's an idf-4.4 association
-bug; (c) check the router's 802.11 mode / security settings.
+RULED OUT: arduino-esp32 3.3.9 / ESP-IDF 5.5.4 fails IDENTICALLY (wl=6, reason 2,
+assoc=0). So it is NOT an idf-version bug -- both 4.4 and 5.5 fail; only the
+NINA-W102-specific nina-fw (idf 3.3) associates. The split is nina-fw vs GENERIC
+arduino-esp32, which points at module-specific PHY/RF calibration data (u-blox
+NINA-W102): generic PHY init data -> impaired management-frame TX -> the AP never
+acks the auth frame (fits scan-works/RX but assoc-fails/TX). Codex also ruled out
+the UART (GPIO1/3 are plain UART pins, not RF/strap).
+
+Open paths (all deep): (a) extract/inject the NINA-W102 PHY init data; (b) add a
+UART command layer to nina-fw itself (idf 3.3, proven WiFi) -- guaranteed assoc but
+needs the idf-3.3 build; (c) a monitor-mode pcap on ch6 to confirm ESP-sends-auth /
+AP-doesn't-ack; (d) accept the UART path can't do WiFi with generic fw and keep the
+SPI camera server (~10s/frame, tag nina-spi-camera-webserver).

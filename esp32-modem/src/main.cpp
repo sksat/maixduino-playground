@@ -131,19 +131,26 @@ void loop() {
       for (int tryn = 0; tryn < 4 && WiFi.status() != WL_CONNECTED; tryn++) {
         WiFi.disconnect(true, true);
         delay(200);
-        esp_wifi_set_max_tx_power(34); // low TX -- avoid RF saturation at -37 dBm
-        // Populate Arduino's STA config without connecting, then DISABLE PMF: arduino-
-        // esp32 2.0.17 sets pmf_cfg.capable=true, and a router with broken optional-PMF
-        // handling never completes auth (reason-2 AUTH_EXPIRE) -- nina-fw (idf 3.3, no
-        // PMF) connects fine. Force plain WPA2-PSK to the exact AP, then connect.
+        esp_wifi_set_max_tx_power(34);
+        // Populate+start the STA via WiFi.begin (keeps arduino's state machine in
+        // sync) but DON'T connect yet, then strip every idf-4.x capability IE the
+        // router might reject during association (802.11k rm / 802.11v btm / MBO /
+        // PMF / SAE) -- the likely cause of assoc never completing while nina-fw
+        // (idf 3.3, none of these) associates fine -- and connect.
         if (seen) WiFi.begin(ssid, pass, ch, bssid, false);
         else WiFi.begin(ssid, pass, 0, nullptr, false);
         wifi_config_t cfg = {};
         esp_wifi_get_config(WIFI_IF_STA, &cfg);
+        cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+        cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+        cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
         cfg.sta.pmf_cfg.capable = false;
         cfg.sta.pmf_cfg.required = false;
-        cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-        cfg.sta.scan_method = WIFI_FAST_SCAN;
+        cfg.sta.rm_enabled = 0;
+        cfg.sta.btm_enabled = 0;
+        cfg.sta.mbo_enabled = 0;
+        cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_UNSPECIFIED;
+        cfg.sta.listen_interval = 1;
         if (seen) {
           cfg.sta.channel = ch;
           cfg.sta.bssid_set = true;
