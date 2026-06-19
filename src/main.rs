@@ -132,8 +132,15 @@ fn configure_res(dvp: &Dvp, r: usize) -> (usize, usize) {
     let (w, h) = RES[r];
     dvp.set_image_format(ImageFormat::RGB);
     dvp.set_image_size(false, w as u16, h as u16);
-    for _ in 0..6 {
-        dvp.get_image(); // warm-up frames at the new size (discard)
+    // Warm-up by wall-clock, not frame count: the OV2640's auto exposure / white
+    // balance restart on the re-init and take ~1-2 s to converge. A fixed frame count
+    // isn't enough at VGA (lower fps), so the first served frame after a switch came
+    // out green (the un-corrected Bayer 2x-green dominates until AWB settles). Capture
+    // and discard for ~2 s of real time so the first served frame is balanced. (This
+    // only runs on an actual size change, not on every same-res frame.)
+    let t_end = mtime_ms() + 2000;
+    while mtime_ms() < t_end {
+        dvp.get_image();
     }
     (w, h)
 }
