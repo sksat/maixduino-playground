@@ -373,7 +373,11 @@ pub fn ov2640_jpeg_qvga(dvp: &Dvp) {
 static OV2640_RGB565_VGA_DELTA: &[(u8, u8)] = &[
     // Sensor bank: VGA readout window + slow pixel clock
     (0xff, 0x01),
-    (0x11, 0x01), // CLKRC: halve the pixel clock
+    (0x11, 0x00), // CLKRC: full pixel clock. The old 0x01 (halved) was overly cautious —
+    // at the slow XCLK (clk_div=7) the DVP samples the full-rate PCLK cleanly (measured
+    // speckle 0.32%, same as QVGA), and it makes VGA capture ~2x faster (fully hidden
+    // behind encode+send in the pipeline). Don't pair this with a faster XCLK without
+    // re-checking quality — full PCLK at clk_div<7 may exceed the DVP data-pad limit.
     (0x12, 0x00),
     (0x17, 0x11),
     (0x18, 0x75),
