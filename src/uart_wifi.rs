@@ -185,19 +185,19 @@ pub fn drain(ms: u64) {
     }
 }
 
-/// Send a command frame and read one reply frame. Returns (reply_tag, payload_len)
-/// with the payload copied into `reply` (truncated to its capacity; extra drained).
-pub fn cmd(
-    tag: u8,
-    payload: &[u8],
-    reply: &mut [u8],
-    timeout_ms: u64,
-) -> Option<(u8, usize)> {
+/// Send a command frame (no reply read). Use with `read_reply` for pipelined sends
+/// (keep several frames in flight, then collect their acks).
+pub fn send_frame(tag: u8, payload: &[u8]) {
     let hdr = [tag, (payload.len() & 0xff) as u8, ((payload.len() >> 8) & 0xff) as u8];
     write(&hdr);
     if !payload.is_empty() {
         write(payload);
     }
+}
+
+/// Read one reply frame: resync to the `AA 55` prefix, then tag + len + payload.
+/// Returns (reply_tag, payload_len) with the payload copied into `reply`.
+pub fn read_reply(reply: &mut [u8], timeout_ms: u64) -> Option<(u8, usize)> {
     // Resync to the reply's AA 55 prefix, skipping any line noise (e.g. from the
     // ESP32 restarting its UART around the WiFi connect).
     let mut b = [0u8; 1];
@@ -234,4 +234,11 @@ pub fn cmd(
         extra -= 1;
     }
     Some((rh[0], n))
+}
+
+/// Send a command frame and read one reply frame (stop-and-wait). For bulk transfers
+/// use `send_frame` + `read_reply` directly to pipeline (several frames in flight).
+pub fn cmd(tag: u8, payload: &[u8], reply: &mut [u8], timeout_ms: u64) -> Option<(u8, usize)> {
+    send_frame(tag, payload);
+    read_reply(reply, timeout_ms)
 }

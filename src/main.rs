@@ -292,26 +292,77 @@ fn flag(req: &[u8], q: &[u8], a: &[u8]) -> usize {
     }
 }
 
-/// Stream `data` to the TCP client over the UART modem. The ESP32's `client.write()`
-/// blocks until lwip accepts the bytes (patched nina-fw), so each `S` reply IS the
-/// flow control. Returns false if the client went away.
 const CHUNK: usize = 1440; // <= ESP32 MAXPL (1600)
+// Pipelined frames in flight. Capped at 2 by the K210's 16-byte UART1 RX FIFO: while
+// the K210 busy-sends a frame it can't drain acks, and >2 pending 7-byte acks (>14 B)
+// would overflow that FIFO and desync. 2 still overlaps one frame's UART send with the
+// ESP32's WiFi write of the previous (the ESP32's RX ring buffer, 8 KB, easily holds 2).
+const WINDOW: usize = 2;
+
+/// Pipelined sender: pushes command frames over UART without waiting for each ack, up
+/// to WINDOW in flight, so the K210's UART send of frame N+1 overlaps the ESP32's WiFi
+/// write of frame N (the ESP32's UART RX ISR keeps buffering while its loop blocks in
+/// client.write). The ESP32 acks each frame as it finishes; we collect acks to free
+/// window slots. Flow control: the ESP32's `client.write` still blocks on lwip, and an
+/// ack with sent==0 means the client went away. Removes the stop-and-wait gap (~35%).
+struct Pipe {
+    inflight: usize,
+    ok: bool,
+}
+impl Pipe {
+    fn new() -> Self {
+        Pipe { inflight: 0, ok: true }
+    }
+    /// Collect one ack, freeing a window slot. Returns false on failure.
+    fn ack(&mut self, reply: &mut [u8]) -> bool {
+        match uart_wifi::read_reply(reply, 8000) {
+            Some((b'S', n)) if n >= 2 => {
+                self.inflight -= 1;
+                if (reply[0] as usize) | ((reply[1] as usize) << 8) == 0 {
+                    self.ok = false; // client gone
+                }
+                self.ok
+            }
+            _ => {
+                self.inflight = self.inflight.saturating_sub(1);
+                self.ok = false;
+                false
+            }
+        }
+    }
+    /// Send one frame (<= CHUNK), waiting for a slot first. `data` is fully written to
+    /// the UART before returning, so the caller may reuse its buffer immediately.
+    fn push(&mut self, cmd: u8, data: &[u8], reply: &mut [u8]) {
+        if !self.ok {
+            return;
+        }
+        if self.inflight >= WINDOW && !self.ack(reply) {
+            return;
+        }
+        uart_wifi::send_frame(cmd, data);
+        self.inflight += 1;
+    }
+    /// Drain the remaining acks. Returns true if every frame was accepted.
+    fn flush(&mut self, reply: &mut [u8]) -> bool {
+        while self.inflight > 0 {
+            if !self.ack(reply) {
+                break;
+            }
+        }
+        self.ok
+    }
+}
+
+/// Stream contiguous `data` over the UART modem, pipelined (header/JPEG/page paths).
 fn send_all(cmd: u8, data: &[u8], reply: &mut [u8]) -> bool {
+    let mut p = Pipe::new();
     let mut off = 0;
     while off < data.len() {
         let end = (off + CHUNK).min(data.len());
-        match uart_wifi::cmd(cmd, &data[off..end], reply, 8000) {
-            Some((b'S', n)) if n >= 2 => {
-                let sent = (reply[0] as usize) | ((reply[1] as usize) << 8);
-                if sent == 0 {
-                    return false;
-                }
-                off += sent.min(end - off);
-            }
-            _ => return false,
-        }
+        p.push(cmd, &data[off..end], reply);
+        off = end;
     }
-    true
+    p.flush(reply)
 }
 
 static mut DBG_SENT: u32 = 0;
@@ -343,9 +394,10 @@ fn serve_bmp(w: usize, h: usize, expand565: bool, reply: &mut [u8]) -> bool {
     hdr[n + 28] = 24;
     le32(&mut hdr[n + 34..], pixels);
     n = h0 + 54;
-    if !send_all(uart_wifi::CMD_SEND, &hdr[..n], reply) {
-        return false;
-    }
+    // One pipeline across the header + every pixel chunk, so frame N+1's UART send
+    // overlaps the ESP32's WiFi write of frame N.
+    let mut pipe = Pipe::new();
+    pipe.push(uart_wifi::CMD_SEND, &hdr[..n], reply);
     unsafe { DBG_SENT = n as u32 };
 
     // W*3 (and W*2) is a multiple of 4 for W in {160,320,640}, so rows need no padding.
@@ -358,11 +410,12 @@ fn serve_bmp(w: usize, h: usize, expand565: bool, reply: &mut [u8]) -> bool {
         row -= 1;
         for col in 0..w {
             if k + need > CHUNK {
-                if !send_all(pcmd, &chunk[..k], reply) {
-                    return false;
-                }
+                pipe.push(pcmd, &chunk[..k], reply);
                 unsafe { DBG_SENT += k as u32 };
                 k = 0;
+                if !pipe.ok {
+                    return false;
+                }
             }
             let i = row * w + col;
             let word = unsafe { core::ptr::read_volatile(fb.add(i / 2)) };
@@ -380,12 +433,10 @@ fn serve_bmp(w: usize, h: usize, expand565: bool, reply: &mut [u8]) -> bool {
         }
     }
     if k > 0 {
-        if !send_all(pcmd, &chunk[..k], reply) {
-            return false;
-        }
+        pipe.push(pcmd, &chunk[..k], reply);
         unsafe { DBG_SENT += k as u32 };
     }
-    true
+    pipe.flush(reply)
 }
 
 // ---- JPEG spike (option 2): OV2640 hardware JPEG over UART ----------------------
