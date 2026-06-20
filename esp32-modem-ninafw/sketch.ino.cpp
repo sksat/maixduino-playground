@@ -173,6 +173,28 @@ void loop() {
       break;
     }
 
+    case 'B': {                             // RGB565 payload -> expand to BGR24, send
+      // The K210 sends 2 bytes/px (RGB565 LE) instead of inflating to 3 -- 33% less
+      // UART, which is the bottleneck. We expand here (WiFi side has headroom) so the
+      // browser still gets a normal 24-bit BMP. Reply = SOURCE (RGB565) bytes consumed.
+      static uint8_t ob[MAXPL / 2 * 3];
+      uint16_t np = len / 2;                // pixels in this chunk
+      uint16_t k = 0;
+      for (uint16_t i = 0; i < np; i++) {
+        uint16_t p = pl[2 * i] | (pl[2 * i + 1] << 8);
+        ob[k++] = (uint8_t)((p & 0x1f) << 3);        // B
+        ob[k++] = (uint8_t)(((p >> 5) & 0x3f) << 2); // G
+        ob[k++] = (uint8_t)(((p >> 11) & 0x1f) << 3);// R
+      }
+      size_t w = 0;
+      if (client.connected()) w = client.write(ob, k); // blocks until lwip accepts all
+      // client.write returns bytes written (k on success); map back to source bytes.
+      uint16_t consumed = (w >= k) ? (uint16_t)(np * 2) : (uint16_t)((w / 3) * 2);
+      uint8_t b[2] = {(uint8_t)(consumed & 0xff), (uint8_t)(consumed >> 8)};
+      sendFrame('S', b, 2);
+      break;
+    }
+
     case 'X':                               // close the client
       client.flush();
       client.stop();

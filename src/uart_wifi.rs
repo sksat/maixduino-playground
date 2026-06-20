@@ -30,6 +30,7 @@ pub const CMD_LISTEN: u8 = b'L';
 pub const CMD_ACCEPT: u8 = b'A';
 pub const CMD_RECV: u8 = b'R';
 pub const CMD_SEND: u8 = b'S';
+pub const CMD_SEND565: u8 = b'B'; // send RGB565 bytes; ESP32 expands to BGR24 (33% less UART)
 pub const CMD_CLOSE: u8 = b'X';
 
 fn uart1() -> &'static pac::uart1::RegisterBlock {

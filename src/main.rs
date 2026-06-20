@@ -124,7 +124,7 @@ fn le32(out: &mut [u8], v: u32) {
 // Resolution picker + denoise toggle + live <img> reload. Each control updates r/d;
 // the loop re-requests /cam.bmp?r=<r>&d=<d> on load (cache-busted) so the stream just
 // runs as fast as frames serve.
-const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title><meta name=viewport content=\"width=device-width,initial-scale=1\"></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><b>BMP:</b> <button onclick=\"S(0)\">QQVGA</button> <button onclick=\"S(1)\">QVGA</button> <button onclick=\"S(2)\">VGA</button> &nbsp; <button onclick=\"J()\">JPEG (QVGA)</button> &nbsp; <button onclick=\"D()\" id=\"d\">Denoise: OFF</button></div><div style=\"margin-top:8px\"><img id=\"c\" style=\"width:640px;max-width:98vw;image-rendering:pixelated\"></div><p id=\"s\">connecting...</p><p>OV2640 over DVP, served live by the onboard ESP32 (nina-fw over UART @ 3 Mbaud). BMP modes are lossless RGB565; Denoise = 3-frame temporal median + per-row destripe. JPEG is the OV2640 hardware codec (~8 KB, fast) -- but a DVP byte error can corrupt a DC coefficient and tint a frame (no restart markers), so some frames colour-shift.</p><script>var r=1,d=0,j=0,n=0,t0=Date.now();function S(x){r=x;j=0;n=0;t0=Date.now()}function J(){j=1;n=0;t0=Date.now()}function D(){d=d?0:1;document.getElementById('d').textContent='Denoise: '+(d?'ON':'OFF');n=0;t0=Date.now()}function L(){var i=document.getElementById('c');i.onload=function(){n++;var f=(n*1000/(Date.now()-t0)).toFixed(2);document.getElementById('s').textContent=(j?'JPEG QVGA':['QQVGA','QVGA','VGA'][r])+(d&&!j?' +denoise':'')+'  frame '+n+'  ('+f+' fps)';setTimeout(L,40)};i.onerror=function(){setTimeout(L,800)};i.src='/cam.bmp?r='+r+'&d='+d+'&j='+j+'&t='+Date.now()}L()</script></body></html>";
+const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title><meta name=viewport content=\"width=device-width,initial-scale=1\"></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><button id=\"r0\" onclick=\"S(0)\">QQVGA</button> <button id=\"r1\" onclick=\"S(1)\">QVGA</button> <button id=\"r2\" onclick=\"S(2)\">VGA</button> <button id=\"jb\" onclick=\"J()\">JPEG</button> &nbsp; <button id=\"db\" onclick=\"D()\">Denoise: OFF</button> <button id=\"eb\" onclick=\"E()\">RGB565: OFF</button></div><div style=\"margin-top:8px\"><img id=\"c\" style=\"width:640px;max-width:98vw;image-rendering:pixelated\"></div><p id=\"s\">connecting...</p><p>BMP = lossless RGB565. Denoise = median + destripe. RGB565 = send 2 B/px and let the ESP32 expand (33% less UART, lossless). JPEG = OV2640 hardware codec (~8 KB, fast) -- some frames colour-shift (DVP error on a DC coeff, no restart markers).</p><script>var r=1,d=0,e=0,j=0,n=0,t0=Date.now();function g(i){return document.getElementById(i)}function upd(){var b=!j,i;for(i=0;i<3;i++)g('r'+i).style.background=(b&&r==i)?'#383':'';g('jb').style.background=j?'#383':'';var x=g('db'),y=g('eb');x.disabled=y.disabled=!b;x.style.opacity=y.style.opacity=b?1:.4;x.textContent='Denoise: '+(d?'ON':'OFF');y.textContent='RGB565: '+(e?'ON':'OFF')}function S(x){r=x;j=0;n=0;t0=Date.now();upd()}function J(){j=1;n=0;t0=Date.now();upd()}function D(){if(!j){d=d?0:1;n=0;t0=Date.now();upd()}}function E(){if(!j){e=e?0:1;n=0;t0=Date.now();upd()}}function L(){var i=g('c');i.onload=function(){n++;var f=(n*1000/(Date.now()-t0)).toFixed(2);g('s').textContent=(j?'JPEG QVGA':['QQVGA','QVGA','VGA'][r]+(d?' +denoise':'')+(e?' +RGB565':''))+'  frame '+n+'  ('+f+' fps)';setTimeout(L,40)};i.onerror=function(){setTimeout(L,800)};i.src='/cam.bmp?r='+r+'&d='+d+'&e='+e+'&j='+j+'&t='+Date.now()}upd();L()</script></body></html>";
 
 fn sysctl() -> *const pac::sysctl::RegisterBlock {
     pac::SYSCTL::ptr()
@@ -282,11 +282,11 @@ fn parse_digit(req: &[u8], key: &[u8], default: usize, maxv: usize) -> usize {
 /// blocks until lwip accepts the bytes (patched nina-fw), so each `S` reply IS the
 /// flow control. Returns false if the client went away.
 const CHUNK: usize = 1440; // <= ESP32 MAXPL (1600)
-fn send_all(data: &[u8], reply: &mut [u8]) -> bool {
+fn send_all(cmd: u8, data: &[u8], reply: &mut [u8]) -> bool {
     let mut off = 0;
     while off < data.len() {
         let end = (off + CHUNK).min(data.len());
-        match uart_wifi::cmd(uart_wifi::CMD_SEND, &data[off..end], reply, 8000) {
+        match uart_wifi::cmd(cmd, &data[off..end], reply, 8000) {
             Some((b'S', n)) if n >= 2 => {
                 let sent = (reply[0] as usize) | ((reply[1] as usize) << 8);
                 if sent == 0 {
@@ -303,7 +303,11 @@ fn send_all(data: &[u8], reply: &mut [u8]) -> bool {
 static mut DBG_SENT: u32 = 0;
 
 /// Stream a `w`x`h` 24-bit BMP (bottom-up, BGR) of CAP[0] to the client.
-fn serve_bmp(w: usize, h: usize, reply: &mut [u8]) -> bool {
+/// Serve a `w`x`h` 24-bit BMP of CAP[0]. The HTTP+BMP header always declares 24-bit.
+/// If `expand565`, the pixel data goes over UART as RGB565 (2 B/px) and the ESP32
+/// expands it to BGR24 (CMD_SEND565) -- 33% less UART (the bottleneck), lossless, same
+/// bytes on the wire to the browser. Else the K210 expands to BGR24 itself (CMD_SEND).
+fn serve_bmp(w: usize, h: usize, expand565: bool, reply: &mut [u8]) -> bool {
     let fb = cap_uncached(0) as *const u32;
     let pixels = (w * h * 3) as u32;
     let filesize = 54 + pixels;
@@ -325,20 +329,22 @@ fn serve_bmp(w: usize, h: usize, reply: &mut [u8]) -> bool {
     hdr[n + 28] = 24;
     le32(&mut hdr[n + 34..], pixels);
     n = h0 + 54;
-    if !send_all(&hdr[..n], reply) {
+    if !send_all(uart_wifi::CMD_SEND, &hdr[..n], reply) {
         return false;
     }
     unsafe { DBG_SENT = n as u32 };
 
-    // W*3 is a multiple of 4 for W in {160,320,640}, so BMP rows need no padding.
+    // W*3 (and W*2) is a multiple of 4 for W in {160,320,640}, so rows need no padding.
+    let pcmd = if expand565 { uart_wifi::CMD_SEND565 } else { uart_wifi::CMD_SEND };
+    let need = if expand565 { 2 } else { 3 };
     let mut chunk = [0u8; CHUNK];
     let mut k = 0;
     let mut row = h;
     while row > 0 {
         row -= 1;
         for col in 0..w {
-            if k + 3 > CHUNK {
-                if !send_all(&chunk[..k], reply) {
+            if k + need > CHUNK {
+                if !send_all(pcmd, &chunk[..k], reply) {
                     return false;
                 }
                 unsafe { DBG_SENT += k as u32 };
@@ -347,14 +353,20 @@ fn serve_bmp(w: usize, h: usize, reply: &mut [u8]) -> bool {
             let i = row * w + col;
             let word = unsafe { core::ptr::read_volatile(fb.add(i / 2)) };
             let px = if i & 1 == 0 { word & 0xffff } else { word >> 16 };
-            chunk[k] = ((px & 0x1f) << 3) as u8; // B
-            chunk[k + 1] = (((px >> 5) & 0x3f) << 2) as u8; // G
-            chunk[k + 2] = (((px >> 11) & 0x1f) << 3) as u8; // R
-            k += 3;
+            if expand565 {
+                chunk[k] = px as u8; // RGB565 little-endian; ESP32 expands to BGR24
+                chunk[k + 1] = (px >> 8) as u8;
+                k += 2;
+            } else {
+                chunk[k] = ((px & 0x1f) << 3) as u8; // B
+                chunk[k + 1] = (((px >> 5) & 0x3f) << 2) as u8; // G
+                chunk[k + 2] = (((px >> 11) & 0x1f) << 3) as u8; // R
+                k += 3;
+            }
         }
     }
     if k > 0 {
-        if !send_all(&chunk[..k], reply) {
+        if !send_all(pcmd, &chunk[..k], reply) {
             return false;
         }
         unsafe { DBG_SENT += k as u32 };
@@ -433,11 +445,11 @@ fn serve_jpeg(dvp: &Dvp, reply: &mut [u8]) -> (bool, usize) {
     n += append(&mut hdr, n, b"HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: ");
     n += write_dec(&mut hdr[n..], len as u32);
     n += append(&mut hdr, n, b"\r\nConnection: close\r\n\r\n");
-    if !send_all(&hdr[..n], reply) {
+    if !send_all(uart_wifi::CMD_SEND, &hdr[..n], reply) {
         return (true, len);
     }
     let slice = unsafe { core::slice::from_raw_parts(bytes.add(soi), len) };
-    send_all(slice, reply);
+    send_all(uart_wifi::CMD_SEND, slice, reply);
     (true, len)
 }
 
@@ -596,6 +608,7 @@ fn main() -> ! {
             }
             let r = parse_digit(&req[..rl], b"?r=", cur_res, 2);
             let d = parse_digit(&req[..rl], b"&d=", 0, 1);
+            let e = parse_digit(&req[..rl], b"&e=", 0, 1); // RGB565-direct (ESP32 expands)
             if r != cur_res {
                 let (nw, nh) = configure_res(&dvp, r); // ~185 SCCB writes + warm-up
                 w = nw;
@@ -613,7 +626,7 @@ fn main() -> ! {
             }
             let start = mtime_ms();
             unsafe { DBG_SENT = 0 };
-            let ok = serve_bmp(w, h, &mut reply);
+            let ok = serve_bmp(w, h, e == 1, &mut reply);
             let ms = mtime_ms().wrapping_sub(start);
             frame_no += 1;
             puts(b"frame ");
@@ -622,6 +635,8 @@ fn main() -> ! {
             put_dec(cur_res as u32);
             puts(b" d");
             put_dec(d as u32);
+            puts(b" e");
+            put_dec(e as u32);
             puts(if ok { b" ok " } else { b" abort " });
             put_dec(unsafe { DBG_SENT });
             puts(b"B ");
@@ -634,7 +649,7 @@ fn main() -> ! {
             hn += write_dec(&mut resp[hn..], HTML.len() as u32);
             hn += append(&mut resp, hn, b"\r\nConnection: close\r\n\r\n");
             hn += append(&mut resp, hn, HTML);
-            send_all(&resp[..hn], &mut reply);
+            send_all(uart_wifi::CMD_SEND, &resp[..hn], &mut reply);
             puts(b"served page\n");
         }
 
