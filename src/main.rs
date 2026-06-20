@@ -454,7 +454,17 @@ fn serve_swjpeg(w: usize, h: usize, reply: &mut [u8]) -> (bool, usize, u64) {
         core::slice::from_raw_parts_mut(cap_uncached(1) as *mut u8, MAXW * MAXH / 2 * 4)
     };
     let t_enc = mtime_ms();
-    let len = match jpeg::encode(cap_uncached(0) as *const u32, w, h, out) {
+    // Copy the frame uncached(0) -> cached(2) once. The encoder reads each pixel ~2x
+    // (luma + chroma); reading from the cached alias makes those hit L1 instead of
+    // paying the uncached-AXI latency on every access. One sequential copy (W*H/2 word
+    // reads) is far cheaper than 2*W*H scattered uncached reads.
+    let words = w * h / 2;
+    unsafe {
+        let src = core::slice::from_raw_parts(cap_uncached(0) as *const u32, words);
+        let dst = core::slice::from_raw_parts_mut(cap_cached(2) as *mut u32, words);
+        dst.copy_from_slice(src);
+    }
+    let len = match jpeg::encode(cap_cached(2) as *const u32, w, h, out) {
         Some(n) => n,
         None => return (false, 0, 0),
     };

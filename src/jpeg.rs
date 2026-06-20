@@ -1,10 +1,12 @@
 //! Minimal baseline JPEG encoder (4:2:0, integer DCT), no_std, no alloc.
 //!
-//! Encodes an RGB565 frame (read from the uncached SRAM alias) into a caller-provided
-//! buffer as a JFIF JPEG. Standard quant (quality 80) + standard Huffman tables, a
-//! direct fixed-point 8x8 DCT, no restart markers (the byte stream is clean: computed
-//! on-chip and sent byte-exact over the flow-controlled UART). The point is to shrink
-//! what crosses the UART (the bottleneck) ~10-20x; the browser decodes natively.
+//! Encodes an RGB565 frame into a caller-provided buffer as a JFIF JPEG. Standard quant
+//! (quality 80) + standard Huffman tables, a fixed-point 8x8 DCT (even/odd decomposition,
+//! 32 mults/pass), reciprocal quantization (multiply+shift, no divides), no restart
+//! markers (the byte stream is clean: computed on-chip and sent byte-exact over the
+//! flow-controlled UART). The point is to shrink what crosses the UART (the bottleneck)
+//! ~10-20x; the browser decodes natively. The caller copies the frame into a cached
+//! buffer first, so the ~2 reads/pixel here hit L1 rather than the uncached AXI alias.
 //!
 //! Tables (quant/DCT/Huffman/DHT) are generated; see the git history for the script.
 
@@ -87,25 +89,53 @@ fn cat(v: i32) -> (u32, u32) {
     (size, bits & ((1u32 << size) - 1))
 }
 
-/// In-place forward 8x8 DCT (direct, fixed-point P=11, descale after each pass).
+/// 8-point 1D DCT via even/odd decomposition (32 mults instead of 64). Output is
+/// identical to the direct sum, so the descale and quant tables are unchanged:
+/// D[u][7-x] = (-1)^u * D[u][x], so even-u outputs use the sums and odd-u the diffs.
+#[inline]
+fn dct8(v: &[i32; 8]) -> [i32; 8] {
+    let s0 = v[0] + v[7];
+    let s1 = v[1] + v[6];
+    let s2 = v[2] + v[5];
+    let s3 = v[3] + v[4];
+    let d0 = v[0] - v[7];
+    let d1 = v[1] - v[6];
+    let d2 = v[2] - v[5];
+    let d3 = v[3] - v[4];
+    let m = |a: i32, b: i32, c: i32, d: i32, u: usize| -> i32 {
+        a * DCT_D[u * 8] + b * DCT_D[u * 8 + 1] + c * DCT_D[u * 8 + 2] + d * DCT_D[u * 8 + 3]
+    };
+    [
+        m(s0, s1, s2, s3, 0),
+        m(d0, d1, d2, d3, 1),
+        m(s0, s1, s2, s3, 2),
+        m(d0, d1, d2, d3, 3),
+        m(s0, s1, s2, s3, 4),
+        m(d0, d1, d2, d3, 5),
+        m(s0, s1, s2, s3, 6),
+        m(d0, d1, d2, d3, 7),
+    ]
+}
+
+/// In-place forward 8x8 DCT (fixed-point P=11, descale after each pass).
 fn fdct(b: &mut [i32; 64]) {
     let mut tmp = [0i32; 64];
     for c in 0..8 {
+        let col = [b[c], b[8 + c], b[16 + c], b[24 + c], b[32 + c], b[40 + c], b[48 + c], b[56 + c]];
+        let o = dct8(&col);
         for u in 0..8 {
-            let mut s = 0i32;
-            for r in 0..8 {
-                s += b[r * 8 + c] * DCT_D[u * 8 + r];
-            }
-            tmp[u * 8 + c] = (s + (1 << 10)) >> 11;
+            tmp[u * 8 + c] = (o[u] + (1 << 10)) >> 11;
         }
     }
     for u in 0..8 {
+        let base = u * 8;
+        let row = [
+            tmp[base], tmp[base + 1], tmp[base + 2], tmp[base + 3],
+            tmp[base + 4], tmp[base + 5], tmp[base + 6], tmp[base + 7],
+        ];
+        let o = dct8(&row);
         for v in 0..8 {
-            let mut s = 0i32;
-            for c in 0..8 {
-                s += tmp[u * 8 + c] * DCT_D[v * 8 + c];
-            }
-            b[u * 8 + v] = (s + (1 << 10)) >> 11;
+            b[base + v] = (o[v] + (1 << 10)) >> 11;
         }
     }
 }
@@ -113,7 +143,7 @@ fn fdct(b: &mut [i32; 64]) {
 /// Quantize a DCT'd block, then Huffman-code DC (differential) + AC (run/size).
 fn code_block(
     coef: &[i32; 64],
-    q: &[u8; 64],
+    recip: &[i32; 64], // round(2^16 / quant[i]); quantize by multiply + shift, no divides
     dc: &[(u16, u8); 12],
     ac: &[(u16, u8); 251],
     prev_dc: &mut i32,
@@ -121,13 +151,10 @@ fn code_block(
 ) {
     let mut qz = [0i32; 64];
     for i in 0..64 {
-        let qq = q[i] as i32;
         let c = coef[i];
-        qz[i] = if c >= 0 {
-            (c + qq / 2) / qq
-        } else {
-            -((-c + qq / 2) / qq)
-        };
+        let a = if c < 0 { -c } else { c };
+        let q = (a * recip[i] + (1 << 15)) >> 16; // ~= round(|c| / quant[i])
+        qz[i] = if c < 0 { -q } else { q };
     }
     // DC: differential
     let diff = qz[0] - *prev_dc;
@@ -257,6 +284,14 @@ pub fn encode(fb: *const u32, w: usize, h: usize, out: &mut [u8]) -> Option<usiz
     let start = write_headers(out, w, h);
     let mut bw = BitW { buf: out, pos: start, acc: 0, n: 0, overflow: false };
     let (mut dc_y, mut dc_cb, mut dc_cr) = (0i32, 0i32, 0i32);
+    // reciprocals once per frame (round(2^16/quant)); turns the per-coeff divide into
+    // a multiply + shift.
+    let mut recip_l = [0i32; 64];
+    let mut recip_c = [0i32; 64];
+    for i in 0..64 {
+        recip_l[i] = (65536 + QUANT_L[i] as i32 / 2) / QUANT_L[i] as i32;
+        recip_c[i] = (65536 + QUANT_C[i] as i32 / 2) / QUANT_C[i] as i32;
+    }
     let mcx = (w + 15) / 16;
     let mcy = (h + 15) / 16;
     for my in 0..mcy {
@@ -273,7 +308,7 @@ pub fn encode(fb: *const u32, w: usize, h: usize, out: &mut [u8]) -> Option<usiz
                         }
                     }
                     fdct(&mut blk);
-                    code_block(&blk, &QUANT_L, &DC_L, &AC_L, &mut dc_y, &mut bw);
+                    code_block(&blk, &recip_l, &DC_L, &AC_L, &mut dc_y, &mut bw);
                 }
             }
             // one Cb + one Cr block, each from 2x2-averaged RGB
@@ -297,9 +332,9 @@ pub fn encode(fb: *const u32, w: usize, h: usize, out: &mut [u8]) -> Option<usiz
                 }
             }
             fdct(&mut cb);
-            code_block(&cb, &QUANT_C, &DC_C, &AC_C, &mut dc_cb, &mut bw);
+            code_block(&cb, &recip_c, &DC_C, &AC_C, &mut dc_cb, &mut bw);
             fdct(&mut cr);
-            code_block(&cr, &QUANT_C, &DC_C, &AC_C, &mut dc_cr, &mut bw);
+            code_block(&cr, &recip_c, &DC_C, &AC_C, &mut dc_cr, &mut bw);
         }
     }
     bw.flush();
