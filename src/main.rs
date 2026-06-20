@@ -22,7 +22,10 @@ mod uart_wifi;
 
 use panic_halt as _;
 
-use dvp::{ov2640_init, ov2640_read_id, ov2640_rgb565_qqvga, ov2640_rgb565_vga, Dvp, ImageFormat};
+use dvp::{
+    ov2640_init, ov2640_jpeg_qvga, ov2640_read_id, ov2640_rgb565_qqvga, ov2640_rgb565_vga, Dvp,
+    ImageFormat,
+};
 use k210_hal::fpioa;
 use k210_hal::pac;
 use k210_hal::prelude::*;
@@ -121,7 +124,7 @@ fn le32(out: &mut [u8], v: u32) {
 // Resolution picker + denoise toggle + live <img> reload. Each control updates r/d;
 // the loop re-requests /cam.bmp?r=<r>&d=<d> on load (cache-busted) so the stream just
 // runs as fast as frames serve.
-const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title><meta name=viewport content=\"width=device-width,initial-scale=1\"></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><button onclick=\"S(0)\">QQVGA</button> <button onclick=\"S(1)\">QVGA</button> <button onclick=\"S(2)\">VGA</button> &nbsp; <button onclick=\"D()\" id=\"d\">Denoise: OFF</button></div><div style=\"margin-top:8px\"><img id=\"c\" style=\"width:640px;max-width:98vw;image-rendering:pixelated\"></div><p id=\"s\">connecting...</p><p>OV2640 over DVP, served live by the onboard ESP32 (nina-fw over UART @ 3 Mbaud). Denoise = 3-frame temporal median (removes speckle) + per-row destripe (removes banding); costs 2 extra captures.</p><script>var r=1,d=0,n=0,t0=Date.now();function S(x){r=x;n=0;t0=Date.now()}function D(){d=d?0:1;document.getElementById('d').textContent='Denoise: '+(d?'ON':'OFF');n=0;t0=Date.now()}function L(){var i=document.getElementById('c');i.onload=function(){n++;var f=(n*1000/(Date.now()-t0)).toFixed(2);document.getElementById('s').textContent=['QQVGA','QVGA','VGA'][r]+(d?' +denoise':'')+'  frame '+n+'  ('+f+' fps)';setTimeout(L,40)};i.onerror=function(){setTimeout(L,800)};i.src='/cam.bmp?r='+r+'&d='+d+'&t='+Date.now()}L()</script></body></html>";
+const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title><meta name=viewport content=\"width=device-width,initial-scale=1\"></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><b>BMP:</b> <button onclick=\"S(0)\">QQVGA</button> <button onclick=\"S(1)\">QVGA</button> <button onclick=\"S(2)\">VGA</button> &nbsp; <button onclick=\"J()\">JPEG (QVGA)</button> &nbsp; <button onclick=\"D()\" id=\"d\">Denoise: OFF</button></div><div style=\"margin-top:8px\"><img id=\"c\" style=\"width:640px;max-width:98vw;image-rendering:pixelated\"></div><p id=\"s\">connecting...</p><p>OV2640 over DVP, served live by the onboard ESP32 (nina-fw over UART @ 3 Mbaud). BMP modes are lossless RGB565; Denoise = 3-frame temporal median + per-row destripe. JPEG is the OV2640 hardware codec (~8 KB, fast) -- but a DVP byte error can corrupt a DC coefficient and tint a frame (no restart markers), so some frames colour-shift.</p><script>var r=1,d=0,j=0,n=0,t0=Date.now();function S(x){r=x;j=0;n=0;t0=Date.now()}function J(){j=1;n=0;t0=Date.now()}function D(){d=d?0:1;document.getElementById('d').textContent='Denoise: '+(d?'ON':'OFF');n=0;t0=Date.now()}function L(){var i=document.getElementById('c');i.onload=function(){n++;var f=(n*1000/(Date.now()-t0)).toFixed(2);document.getElementById('s').textContent=(j?'JPEG QVGA':['QQVGA','QVGA','VGA'][r])+(d&&!j?' +denoise':'')+'  frame '+n+'  ('+f+' fps)';setTimeout(L,40)};i.onerror=function(){setTimeout(L,800)};i.src='/cam.bmp?r='+r+'&d='+d+'&j='+j+'&t='+Date.now()}L()</script></body></html>";
 
 fn sysctl() -> *const pac::sysctl::RegisterBlock {
     pac::SYSCTL::ptr()
@@ -359,6 +362,85 @@ fn serve_bmp(w: usize, h: usize, reply: &mut [u8]) -> bool {
     true
 }
 
+// ---- JPEG spike (option 2): OV2640 hardware JPEG over UART ----------------------
+// Tests whether the hardware JPEG is usable on this board's DVP (which has ~1 random
+// byte error per 15-30 KB). UXGA JPEG is the only config proven to capture cleanly
+// (VGA JPEG hung the DVP frame-sync historically). The capture buffer = full CAP[0].
+const JCAP_WORDS: usize = MAXW * MAXH / 2; // 614 KB capacity for the JPEG byte stream
+
+/// Configure the OV2640 for JPEG (QVGA 320x240) output + a DVP geometry big enough to
+/// hold it. QVGA JPEG is ~few KB, so far more likely to be free of DVP byte errors
+/// than the ~105 KB UXGA stream -- this is the clean-rate spike.
+fn configure_jpeg(dvp: &Dvp) {
+    ov2640_jpeg_qvga(dvp);
+    dvp.set_image_format(ImageFormat::RGB); // DVP just grabs the byte stream
+    dvp.set_image_size(false, MAXW as u16, MAXH as u16);
+    let t_end = mtime_ms() + 2000;
+    while mtime_ms() < t_end {
+        capture(dvp, 0);
+    }
+}
+
+/// Capture a JPEG into CAP[0], byte-swap so the stream is contiguous, find SOI..EOI,
+/// and serve it as image/jpeg. Returns (found, jpeg_len). The DVP packs the byte
+/// stream big-endian within each 32-bit word, so swap_bytes() makes CAP[0] a plain
+/// contiguous JPEG byte array.
+fn serve_jpeg(dvp: &Dvp, reply: &mut [u8]) -> (bool, usize) {
+    capture(dvp, 0);
+    let buf = cap_uncached(0);
+    for j in 0..JCAP_WORDS {
+        unsafe {
+            let w = core::ptr::read_volatile(buf.add(j));
+            core::ptr::write_volatile(buf.add(j), w.swap_bytes());
+        }
+    }
+    let bytes = cap_uncached(0) as *const u8;
+    let nb = JCAP_WORDS * 4;
+    let rd = |i: usize| -> u8 { unsafe { core::ptr::read_volatile(bytes.add(i)) } };
+    // SOI (FF D8)
+    let mut soi = 0usize;
+    let mut found = false;
+    let mut i = 0;
+    while i + 1 < nb {
+        if rd(i) == 0xff && rd(i + 1) == 0xd8 {
+            soi = i;
+            found = true;
+            break;
+        }
+        i += 1;
+    }
+    if !found {
+        return (false, 0);
+    }
+    // EOI (FF D9)
+    let mut eoi = 0usize;
+    found = false;
+    let mut j = soi + 2;
+    while j + 1 < nb {
+        if rd(j) == 0xff && rd(j + 1) == 0xd9 {
+            eoi = j + 2;
+            found = true;
+            break;
+        }
+        j += 1;
+    }
+    if !found {
+        return (false, 0);
+    }
+    let len = eoi - soi;
+    let mut hdr = [0u8; 96];
+    let mut n = 0;
+    n += append(&mut hdr, n, b"HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: ");
+    n += write_dec(&mut hdr[n..], len as u32);
+    n += append(&mut hdr, n, b"\r\nConnection: close\r\n\r\n");
+    if !send_all(&hdr[..n], reply) {
+        return (true, len);
+    }
+    let slice = unsafe { core::slice::from_raw_parts(bytes.add(soi), len) };
+    send_all(slice, reply);
+    (true, len)
+}
+
 #[entry]
 fn main() -> ! {
     let p = pac::Peripherals::take().unwrap();
@@ -405,6 +487,7 @@ fn main() -> ! {
     dvp.set_ai_addr(None);
     dvp.set_auto(false);
     let mut cur_res = 1usize; // default QVGA (matches the page's default r=1)
+    let mut cur_jpeg = false; // JPEG mode (option-2 spike), toggled by &j=1
     let (mut w, mut h) = configure_res(&dvp, cur_res);
     puts(b"camera ready\n");
 
@@ -487,7 +570,30 @@ fn main() -> ! {
         }
         let want_bmp = req[..rl].windows(4).any(|x| x == b".bmp");
 
-        if want_bmp {
+        if want_bmp && parse_digit(&req[..rl], b"&j=", 0, 1) == 1 {
+            // ---- JPEG spike branch (?j=1) ----
+            if !cur_jpeg {
+                configure_jpeg(&dvp);
+                cur_jpeg = true;
+            }
+            let start = mtime_ms();
+            let (found, len) = serve_jpeg(&dvp, &mut reply);
+            let ms = mtime_ms().wrapping_sub(start);
+            frame_no += 1;
+            puts(b"frame ");
+            put_dec(frame_no);
+            puts(if found { b" JPG " } else { b" JPG-NOTFOUND " });
+            put_dec(len as u32);
+            puts(b"B ");
+            put_dec(ms as u32);
+            puts(b"ms\n");
+        } else if want_bmp {
+            if cur_jpeg {
+                let (nw, nh) = configure_res(&dvp, cur_res); // back to RGB
+                w = nw;
+                h = nh;
+                cur_jpeg = false;
+            }
             let r = parse_digit(&req[..rl], b"?r=", cur_res, 2);
             let d = parse_digit(&req[..rl], b"&d=", 0, 1);
             if r != cur_res {

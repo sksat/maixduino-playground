@@ -300,6 +300,31 @@ pub fn ov2640_jpeg_uxga(dvp: &Dvp) {
     }
 }
 
+/// ArduCAM `OV2640_320x240_JPEG` size block: SVGA sensor readout window + a coherent
+/// DSP scaler/PCLK set for 320x240 output. Applied AFTER the JPEG common init (quant
+/// tables etc. from the UXGA config), it overrides the window+scaler+PCLK together --
+/// changing only the output size (ZMOW/ZMOH) leaves the scaler incoherent and yields a
+/// valid-JPEG-of-garbage, which is exactly what the partial override produced.
+static OV2640_320X240_JPEG_SIZE: &[(u8, u8)] = &[
+    (0xff, 0x01), (0x12, 0x40), (0x17, 0x11), (0x18, 0x43), (0x19, 0x00), (0x1a, 0x4b),
+    (0x32, 0x09), (0x4f, 0xca), (0x50, 0xa8), (0x5a, 0x23), (0x6d, 0x00), (0x39, 0x12),
+    (0x35, 0xda), (0x22, 0x1a), (0x37, 0xc3), (0x23, 0x00), (0x34, 0xc0), (0x36, 0x1a),
+    (0x06, 0x88), (0x07, 0xc0), (0x0d, 0x87), (0x0e, 0x41), (0x4c, 0x00), (0xff, 0x00),
+    (0xe0, 0x04), (0xc0, 0x64), (0xc1, 0x4b), (0x86, 0x35), (0x50, 0x89), (0x51, 0xc8),
+    (0x52, 0x96), (0x53, 0x00), (0x54, 0x00), (0x55, 0x00), (0x57, 0x00), (0x5a, 0x50),
+    (0x5b, 0x3c), (0x5c, 0x00), (0xd3, 0x04), (0xe0, 0x00),
+];
+
+/// JPEG output at QVGA 320x240: the proven UXGA JPEG common init (quant tables etc.),
+/// then the coherent ArduCAM 320x240 size block. A small JPEG (~few KB) gives a much
+/// higher chance of zero DVP byte errors than the ~105 KB UXGA stream.
+pub fn ov2640_jpeg_qvga(dvp: &Dvp) {
+    ov2640_jpeg_uxga(dvp);
+    for &(reg, val) in OV2640_320X240_JPEG_SIZE {
+        dvp.sccb_send(OV2640_ADDR, reg, val);
+    }
+}
+
 /// Delta to bump the OV2640 from the baseline 320x240 RGB565 (`OV2640_CONFIG`) up
 /// to VGA 640x480, still RGB565. Apply *after* `ov2640_init`. This is the ArduCAM
 /// `640x480_JPEG` window+scaler block (sensor readout window 0x17/0x18/0x19/0x1a/
