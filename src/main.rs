@@ -124,7 +124,7 @@ fn le32(out: &mut [u8], v: u32) {
 // Resolution picker + denoise toggle + live <img> reload. Each control updates r/d;
 // the loop re-requests /cam.bmp?r=<r>&d=<d> on load (cache-busted) so the stream just
 // runs as fast as frames serve.
-const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title><meta name=viewport content=\"width=device-width,initial-scale=1\"></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><button id=\"r0\" onclick=\"S(0)\">QQVGA</button> <button id=\"r1\" onclick=\"S(1)\">QVGA</button> <button id=\"r2\" onclick=\"S(2)\">VGA</button> <button id=\"jb\" onclick=\"J()\">JPEG</button> &nbsp; <button id=\"db\" onclick=\"D()\">Denoise: OFF</button> <button id=\"eb\" onclick=\"E()\">RGB565: OFF</button></div><div style=\"margin-top:8px\"><img id=\"c\" style=\"width:640px;max-width:98vw;image-rendering:pixelated\"></div><p id=\"s\">connecting...</p><p>BMP = lossless RGB565. Denoise = median + destripe. RGB565 = send 2 B/px and let the ESP32 expand (33% less UART, lossless). JPEG = OV2640 hardware codec (~8 KB, fast) -- some frames colour-shift (DVP error on a DC coeff, no restart markers).</p><script>var r=1,d=0,e=0,j=0,n=0,t0=Date.now();function g(i){return document.getElementById(i)}function upd(){var b=!j,i;for(i=0;i<3;i++)g('r'+i).style.background=(b&&r==i)?'#383':'';g('jb').style.background=j?'#383':'';var x=g('db'),y=g('eb');x.disabled=y.disabled=!b;x.style.opacity=y.style.opacity=b?1:.4;x.style.background=(b&&d)?'#383':'#555';y.style.background=(b&&e)?'#383':'#555';x.textContent='Denoise '+(d?'ON':'OFF');y.textContent='RGB565 '+(e?'ON':'OFF')}function S(x){r=x;j=0;n=0;t0=Date.now();upd()}function J(){j=1;n=0;t0=Date.now();upd()}function D(){if(!j){d=d?0:1;n=0;t0=Date.now();upd()}}function E(){if(!j){e=e?0:1;n=0;t0=Date.now();upd()}}function L(){var i=g('c');i.onload=function(){n++;var f=(n*1000/(Date.now()-t0)).toFixed(2);g('s').textContent=(j?'JPEG QVGA':['QQVGA','QVGA','VGA'][r]+(d?' +denoise':'')+(e?' +RGB565':''))+'  frame '+n+'  ('+f+' fps)';setTimeout(L,40)};i.onerror=function(){setTimeout(L,800)};i.src='/cam.bmp?r='+r+'&d='+d+'&e='+e+'&j='+j+'&t='+Date.now()}upd();L()</script></body></html>";
+const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title><meta name=viewport content=\"width=device-width,initial-scale=1\"></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><button id=\"r0\" onclick=\"S(0)\">QQVGA</button> <button id=\"r1\" onclick=\"S(1)\">QVGA</button> <button id=\"r2\" onclick=\"S(2)\">VGA</button> <button id=\"jb\" onclick=\"J()\">JPEG</button> &nbsp; <button id=\"db\" onclick=\"D()\">Denoise: OFF</button> <button id=\"eb\" onclick=\"E()\">RGB565: OFF</button></div><div style=\"margin-top:8px\"><img id=\"c\" style=\"width:640px;max-width:98vw;image-rendering:pixelated\"></div><p id=\"s\">connecting...</p><div style=\"margin:6px\"><input id=\"u\" readonly style=\"width:90%;max-width:600px;background:#222;color:#9f9;border:1px solid #444;padding:4px;font-family:monospace\"> <button onclick=\"C()\">Copy URL</button> <span style=\"opacity:.6\">(curl this to keep grabbing this mode)</span></div><p>BMP = lossless RGB565. Denoise = median + destripe. RGB565 = send 2 B/px and let the ESP32 expand (33% less UART, lossless). JPEG = OV2640 hardware codec (~8 KB, fast) -- some frames colour-shift (DVP error on a DC coeff, no restart markers).</p><script>var r=1,d=0,e=0,j=0,n=0,t0=Date.now();function g(i){return document.getElementById(i)}function url(){if(j)return location.origin+'/cam.jpg';var p=['qqvga','qvga','vga'][r]+'.bmp',q=[];if(d)q.push('d=1');if(e)q.push('e=1');return location.origin+'/'+p+(q.length?'?'+q.join('&'):'')}function upd(){var b=!j,i;for(i=0;i<3;i++)g('r'+i).style.background=(b&&r==i)?'#383':'';g('jb').style.background=j?'#383':'';var x=g('db'),y=g('eb');x.disabled=y.disabled=!b;x.style.opacity=y.style.opacity=b?1:.4;x.style.background=(b&&d)?'#383':'#555';y.style.background=(b&&e)?'#383':'#555';x.textContent='Denoise '+(d?'ON':'OFF');y.textContent='RGB565 '+(e?'ON':'OFF');g('u').value=url()}function C(){var u=g('u');u.focus();u.select();u.setSelectionRange(0,99999);try{document.execCommand('copy')}catch(z){}}function S(x){r=x;j=0;n=0;t0=Date.now();upd()}function J(){j=1;n=0;t0=Date.now();upd()}function D(){if(!j){d=d?0:1;n=0;t0=Date.now();upd()}}function E(){if(!j){e=e?0:1;n=0;t0=Date.now();upd()}}function L(){var i=g('c');i.onload=function(){n++;var f=(n*1000/(Date.now()-t0)).toFixed(2);g('s').textContent=(j?'JPEG QVGA':['QQVGA','QVGA','VGA'][r]+(d?' +denoise':'')+(e?' +RGB565':''))+'  frame '+n+'  ('+f+' fps)';setTimeout(L,40)};i.onerror=function(){setTimeout(L,800)};var u=url();i.src=u+(u.indexOf('?')<0?'?':'&')+'t='+Date.now()}upd();L()</script></body></html>";
 
 fn sysctl() -> *const pac::sysctl::RegisterBlock {
     pac::SYSCTL::ptr()
@@ -276,6 +276,20 @@ fn parse_digit(req: &[u8], key: &[u8], default: usize, maxv: usize) -> usize {
         i += 1;
     }
     default
+}
+
+/// True if `hay` contains `needle` (substring).
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    needle.len() <= hay.len() && hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// A 0/1 query flag that may appear as the first (`?k=`) or a later (`&k=`) param.
+fn flag(req: &[u8], q: &[u8], a: &[u8]) -> usize {
+    if parse_digit(req, q, 0, 1) == 1 || parse_digit(req, a, 0, 1) == 1 {
+        1
+    } else {
+        0
+    }
 }
 
 /// Stream `data` to the TCP client over the UART modem. The ESP32's `client.write()`
@@ -580,10 +594,15 @@ fn main() -> ! {
             }
             uart_wifi::sleep_ms(12);
         }
-        let want_bmp = req[..rl].windows(4).any(|x| x == b".bmp");
+        // Mode comes from the PATH: /cam.jpg (JPEG), /{qqvga,qvga,vga}.bmp (BMP);
+        // toggles stay as query flags (?d=1 denoise, ?e=1 RGB565-direct). Old query
+        // forms (?j=1, ?r=N) still work as a fallback.
+        let rs = &req[..rl];
+        let is_jpg = contains(rs, b".jpg") || flag(rs, b"?j=", b"&j=") == 1;
+        let is_bmp = contains(rs, b".bmp");
 
-        if want_bmp && parse_digit(&req[..rl], b"&j=", 0, 1) == 1 {
-            // ---- JPEG spike branch (?j=1) ----
+        if is_jpg {
+            // ---- JPEG mode (/cam.jpg) ----
             if !cur_jpeg {
                 configure_jpeg(&dvp);
                 cur_jpeg = true;
@@ -599,16 +618,26 @@ fn main() -> ! {
             puts(b"B ");
             put_dec(ms as u32);
             puts(b"ms\n");
-        } else if want_bmp {
+        } else if is_bmp {
             if cur_jpeg {
                 let (nw, nh) = configure_res(&dvp, cur_res); // back to RGB
                 w = nw;
                 h = nh;
                 cur_jpeg = false;
             }
-            let r = parse_digit(&req[..rl], b"?r=", cur_res, 2);
-            let d = parse_digit(&req[..rl], b"&d=", 0, 1);
-            let e = parse_digit(&req[..rl], b"&e=", 0, 1); // RGB565-direct (ESP32 expands)
+            // resolution from the path (qqvga before qvga before vga -- substrings!),
+            // else the old ?r= query, else keep current.
+            let r = if contains(rs, b"qqvga") {
+                0
+            } else if contains(rs, b"qvga") {
+                1
+            } else if contains(rs, b"vga") {
+                2
+            } else {
+                parse_digit(rs, b"?r=", cur_res, 2)
+            };
+            let d = flag(rs, b"?d=", b"&d=");
+            let e = flag(rs, b"?e=", b"&e="); // RGB565-direct (ESP32 expands)
             if r != cur_res {
                 let (nw, nh) = configure_res(&dvp, r); // ~185 SCCB writes + warm-up
                 w = nw;
@@ -643,7 +672,7 @@ fn main() -> ! {
             put_dec(ms as u32);
             puts(b"ms\n");
         } else {
-            let mut resp = [0u8; 2560];
+            let mut resp = [0u8; 3072];
             let mut hn = 0;
             hn += append(&mut resp, hn, b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ");
             hn += write_dec(&mut resp[hn..], HTML.len() as u32);
