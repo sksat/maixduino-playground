@@ -1,4 +1,5 @@
-//! K210 camera web server over the UART WiFi path, with web-selectable resolution.
+//! K210 camera web server over the UART WiFi path, with web-selectable resolution
+//! and toggleable on-chip denoise.
 //!
 //! The onboard ESP32 runs the UART-modem nina-fw (esp32-modem-ninafw/): WiFi driven
 //! over UART1 (IO6/IO7), independent of the camera's SPI0/DVP pads. So unlike the SPI
@@ -6,10 +7,10 @@
 //! network -- there is NO ~5 s EN-reset/reconnect/re-listen dance per frame. Each
 //! request captures a FRESH frame and serves it live on a healthy connection.
 //!
-//! The page has QQVGA / QVGA / VGA buttons; `/cam.bmp?r=N` (0/1/2) picks the size,
-//! and the K210 reconfigures the OV2640 only when the requested size changes. Frame
-//! time is UART-bound at 3 Mbaud: QQVGA(57KB) ~0.65s, QVGA(230KB) ~1.0s, VGA(922KB)
-//! ~3.1s.
+//! The page has QQVGA / QVGA / VGA buttons (`/cam.bmp?r=N`, N=0/1/2) and a Denoise
+//! toggle (`&d=1`). Denoise = per-channel temporal median of 3 frames (kills the
+//! random DVP salt-pepper speckle) + per-row destripe (equalizes row brightness,
+//! kills the horizontal banding) -- both this board's DVP signal-quality artifacts.
 //!
 //! Credentials come from `wifi_creds.env` (gitignored) via `build.rs` -> `env!`.
 
@@ -35,7 +36,7 @@ const LINK_BAUD: u32 = 3_000_000; // exact K210 divisor (195MHz/48 = 4.0625); UA
 const WIFI_SSID: &str = env!("WIFI_SSID");
 const WIFI_PASS: &str = env!("WIFI_PASS");
 
-// Frame buffer sized for the largest resolution (VGA); smaller sizes use the front.
+// Frame buffers sized for the largest resolution (VGA); smaller sizes use the front.
 const MAXW: usize = 640;
 const MAXH: usize = 480;
 
@@ -43,7 +44,13 @@ const MAXH: usize = 480;
 struct Frame {
     px: [u32; MAXW * MAXH / 2],
 }
-static mut FRAME: Frame = Frame { px: [0; MAXW * MAXH / 2] };
+// Three capture buffers: denoise OFF uses CAP[0]; denoise ON captures 3 frames and
+// medians them into CAP[0]. 3 * 614 KB (VGA) = 1.84 MB, fits the 6 MB SRAM.
+static mut CAP: [Frame; 3] = [
+    Frame { px: [0; MAXW * MAXH / 2] },
+    Frame { px: [0; MAXW * MAXH / 2] },
+    Frame { px: [0; MAXW * MAXH / 2] },
+];
 
 // (w, h) per resolution index 0/1/2.
 const RES: [(usize, usize); 3] = [(160, 120), (320, 240), (640, 480)];
@@ -111,17 +118,39 @@ fn le32(out: &mut [u8], v: u32) {
     out[3] = (v >> 24) as u8;
 }
 
-// Resolution picker + live <img> reload. Each button switches `r`; the loop re-requests
-// /cam.bmp?r=<r> on load (cache-busted) so the stream just runs as fast as frames serve.
-const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title><meta name=viewport content=\"width=device-width,initial-scale=1\"></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><button onclick=\"S(0)\">QQVGA 160x120</button> <button onclick=\"S(1)\">QVGA 320x240</button> <button onclick=\"S(2)\">VGA 640x480</button></div><div style=\"margin-top:8px\"><img id=\"c\" style=\"width:640px;max-width:98vw;image-rendering:pixelated\"></div><p id=\"s\">connecting...</p><p>OV2640 over DVP, served live by the onboard ESP32 (nina-fw over UART @ 3 Mbaud). Resolution switches the OV2640 on the fly; UART is the bottleneck so bigger = slower (QQVGA ~0.65s, QVGA ~1.0s, VGA ~3.1s/frame).</p><script>var r=1,n=0,t0=Date.now();function S(x){r=x;n=0;t0=Date.now()}function L(){var i=document.getElementById('c');i.onload=function(){n++;var f=(n*1000/(Date.now()-t0)).toFixed(2);document.getElementById('s').textContent='res '+['QQVGA','QVGA','VGA'][r]+'  frame '+n+'  ('+f+' fps)';setTimeout(L,40)};i.onerror=function(){setTimeout(L,800)};i.src='/cam.bmp?r='+r+'&t='+Date.now()}L()</script></body></html>";
+// Resolution picker + denoise toggle + live <img> reload. Each control updates r/d;
+// the loop re-requests /cam.bmp?r=<r>&d=<d> on load (cache-busted) so the stream just
+// runs as fast as frames serve.
+const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title><meta name=viewport content=\"width=device-width,initial-scale=1\"></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><button onclick=\"S(0)\">QQVGA</button> <button onclick=\"S(1)\">QVGA</button> <button onclick=\"S(2)\">VGA</button> &nbsp; <button onclick=\"D()\" id=\"d\">Denoise: OFF</button></div><div style=\"margin-top:8px\"><img id=\"c\" style=\"width:640px;max-width:98vw;image-rendering:pixelated\"></div><p id=\"s\">connecting...</p><p>OV2640 over DVP, served live by the onboard ESP32 (nina-fw over UART @ 3 Mbaud). Denoise = 3-frame temporal median (removes speckle) + per-row destripe (removes banding); costs 2 extra captures.</p><script>var r=1,d=0,n=0,t0=Date.now();function S(x){r=x;n=0;t0=Date.now()}function D(){d=d?0:1;document.getElementById('d').textContent='Denoise: '+(d?'ON':'OFF');n=0;t0=Date.now()}function L(){var i=document.getElementById('c');i.onload=function(){n++;var f=(n*1000/(Date.now()-t0)).toFixed(2);document.getElementById('s').textContent=['QQVGA','QVGA','VGA'][r]+(d?' +denoise':'')+'  frame '+n+'  ('+f+' fps)';setTimeout(L,40)};i.onerror=function(){setTimeout(L,800)};i.src='/cam.bmp?r='+r+'&d='+d+'&t='+Date.now()}L()</script></body></html>";
 
 fn sysctl() -> *const pac::sysctl::RegisterBlock {
     pac::SYSCTL::ptr()
 }
 
+const CLINT_MTIME: *const u64 = 0x0200_BFF8 as *const u64;
+fn mtime_ms() -> u64 {
+    unsafe { core::ptr::read_volatile(CLINT_MTIME) / 7_800 } // mtime ~7.8 MHz
+}
+
+/// Cached / uncached base of capture buffer `i`. The DVP writes via the cached addr
+/// (DMA hits physical SRAM); the CPU reads/writes via the uncached alias so it sees
+/// DMA data and its own writes without cache games.
+fn cap_cached(i: usize) -> u32 {
+    unsafe { core::ptr::addr_of!(CAP[i].px) as u32 }
+}
+fn cap_uncached(i: usize) -> *mut u32 {
+    (cap_cached(i) as usize - UNCACHED_OFFSET) as *mut u32
+}
+
+/// Capture one frame into buffer `i`.
+fn capture(dvp: &Dvp, i: usize) {
+    dvp.set_display_addr(Some(cap_cached(i)));
+    dvp.get_image();
+}
+
 /// Apply the OV2640 + DVP config for resolution index `r` and return (w, h). Re-runs
 /// the baseline RGB565 init each time so switching is order-independent, then layers
-/// the size-specific scaler delta and discards warm-up frames (AE/AWB settle).
+/// the size-specific scaler delta and warms up (AE/AWB settle) for ~2 s of wall-clock.
 fn configure_res(dvp: &Dvp, r: usize) -> (usize, usize) {
     ov2640_init(dvp);
     match r {
@@ -132,17 +161,118 @@ fn configure_res(dvp: &Dvp, r: usize) -> (usize, usize) {
     let (w, h) = RES[r];
     dvp.set_image_format(ImageFormat::RGB);
     dvp.set_image_size(false, w as u16, h as u16);
-    // Warm-up by wall-clock, not frame count: the OV2640's auto exposure / white
-    // balance restart on the re-init and take ~1-2 s to converge. A fixed frame count
-    // isn't enough at VGA (lower fps), so the first served frame after a switch came
-    // out green (the un-corrected Bayer 2x-green dominates until AWB settles). Capture
-    // and discard for ~2 s of real time so the first served frame is balanced. (This
-    // only runs on an actual size change, not on every same-res frame.)
+    // Warm-up by wall-clock, not frame count: the OV2640's AE/AWB restart on the
+    // re-init and take ~1-2 s to converge. A fixed frame count isn't enough at VGA
+    // (lower fps), so the first served frame after a switch came out green. Capture
+    // and discard for ~2 s so the first served frame is balanced. (Only on a size
+    // change, not every same-res frame.)
     let t_end = mtime_ms() + 2000;
     while mtime_ms() < t_end {
-        dvp.get_image();
+        capture(dvp, 0);
     }
     (w, h)
+}
+
+fn med3(a: u32, b: u32, c: u32) -> u32 {
+    let mx = a.max(b).max(c);
+    let mn = a.min(b).min(c);
+    a + b + c - mx - mn
+}
+/// Per-channel RGB565 median of three pixels (rejects a per-frame speckle outlier).
+fn med_px(p0: u32, p1: u32, p2: u32) -> u32 {
+    let r = med3((p0 >> 11) & 0x1f, (p1 >> 11) & 0x1f, (p2 >> 11) & 0x1f);
+    let g = med3((p0 >> 5) & 0x3f, (p1 >> 5) & 0x3f, (p2 >> 5) & 0x3f);
+    let b = med3(p0 & 0x1f, p1 & 0x1f, p2 & 0x1f);
+    (r << 11) | (g << 5) | b
+}
+/// Temporal median of CAP[0..3] -> CAP[0] (in place). The DVP speckle is random per
+/// capture, so the median of 3 frames keeps the correct value at each pixel.
+fn denoise_median(w: usize, h: usize) {
+    let n = w * h / 2;
+    let a = cap_uncached(0);
+    let b = cap_uncached(1);
+    let c = cap_uncached(2);
+    for j in 0..n {
+        unsafe {
+            let w0 = core::ptr::read_volatile(a.add(j));
+            let w1 = core::ptr::read_volatile(b.add(j));
+            let w2 = core::ptr::read_volatile(c.add(j));
+            let lo = med_px(w0 & 0xffff, w1 & 0xffff, w2 & 0xffff);
+            let hi = med_px(w0 >> 16, w1 >> 16, w2 >> 16);
+            core::ptr::write_volatile(a.add(j), lo | (hi << 16));
+        }
+    }
+}
+
+fn clamp_ch(v: i32, max: i32) -> u32 {
+    if v < 0 {
+        0
+    } else if v > max {
+        max as u32
+    } else {
+        v as u32
+    }
+}
+/// Shift one RGB565 pixel's brightness by `off` (in 6-bit G units; R/B scaled by 1/2).
+fn apply_off(p: u32, off: i32) -> u32 {
+    let r = clamp_ch(((p >> 11) & 0x1f) as i32 + off / 2, 0x1f);
+    let g = clamp_ch(((p >> 5) & 0x3f) as i32 + off, 0x3f);
+    let b = clamp_ch((p & 0x1f) as i32 + off / 2, 0x1f);
+    (r << 11) | (g << 5) | b
+}
+/// Per-row destripe on CAP[0]: shift each row's brightness toward the global mean to
+/// flatten the OV2640's per-row fixed-pattern banding. Uses the 6-bit G channel as the
+/// luma proxy and moves R/G/B together so colour is preserved.
+fn destripe(w: usize, h: usize) {
+    let buf = cap_uncached(0);
+    let wpr = w / 2; // u32 words (2 px) per row
+    let mut gsum: u64 = 0;
+    for j in 0..(wpr * h) {
+        let word = unsafe { core::ptr::read_volatile(buf.add(j)) };
+        gsum += (((word >> 5) & 0x3f) + ((word >> 21) & 0x3f)) as u64;
+    }
+    let gmean = (gsum / (w * h) as u64) as i32;
+    for row in 0..h {
+        let base = row * wpr;
+        let mut rsum: u32 = 0;
+        for k in 0..wpr {
+            let word = unsafe { core::ptr::read_volatile(buf.add(base + k)) };
+            rsum += ((word >> 5) & 0x3f) + ((word >> 21) & 0x3f);
+        }
+        let off = gmean - (rsum / w as u32) as i32;
+        if off == 0 {
+            continue;
+        }
+        for k in 0..wpr {
+            let word = unsafe { core::ptr::read_volatile(buf.add(base + k)) };
+            let lo = apply_off(word & 0xffff, off);
+            let hi = apply_off(word >> 16, off);
+            unsafe { core::ptr::write_volatile(buf.add(base + k), lo | (hi << 16)) };
+        }
+    }
+}
+
+/// Parse a single decimal digit following `key` in the request (e.g. b"?r=" -> 2),
+/// clamped to `maxv`; `default` if not found.
+fn parse_digit(req: &[u8], key: &[u8], default: usize, maxv: usize) -> usize {
+    let kl = key.len();
+    if req.len() <= kl {
+        return default;
+    }
+    let mut i = 0;
+    while i + kl < req.len() {
+        if &req[i..i + kl] == key {
+            let d = req[i + kl];
+            if d.is_ascii_digit() {
+                let v = (d - b'0') as usize;
+                if v <= maxv {
+                    return v;
+                }
+            }
+        }
+        i += 1;
+    }
+    default
 }
 
 /// Stream `data` to the TCP client over the UART modem. The ESP32's `client.write()`
@@ -169,9 +299,9 @@ fn send_all(data: &[u8], reply: &mut [u8]) -> bool {
 
 static mut DBG_SENT: u32 = 0;
 
-/// Stream a `w`x`h` 24-bit BMP (bottom-up, BGR) of FRAME to the client.
+/// Stream a `w`x`h` 24-bit BMP (bottom-up, BGR) of CAP[0] to the client.
 fn serve_bmp(w: usize, h: usize, reply: &mut [u8]) -> bool {
-    let fb = (unsafe { core::ptr::addr_of!(FRAME.px) } as usize - UNCACHED_OFFSET) as *const u32;
+    let fb = cap_uncached(0) as *const u32;
     let pixels = (w * h * 3) as u32;
     let filesize = 54 + pixels;
 
@@ -229,26 +359,6 @@ fn serve_bmp(w: usize, h: usize, reply: &mut [u8]) -> bool {
     true
 }
 
-const CLINT_MTIME: *const u64 = 0x0200_BFF8 as *const u64;
-fn mtime_ms() -> u64 {
-    unsafe { core::ptr::read_volatile(CLINT_MTIME) / 7_800 } // mtime ~7.8 MHz
-}
-
-/// Parse the resolution index from a request line containing `?r=N` (N in 0..=2).
-fn parse_res(req: &[u8], default: usize) -> usize {
-    let mut i = 0;
-    while i + 3 < req.len() {
-        if &req[i..i + 3] == b"?r=" {
-            let d = req[i + 3];
-            if (b'0'..=b'2').contains(&d) {
-                return (d - b'0') as usize;
-            }
-        }
-        i += 1;
-    }
-    default
-}
-
 #[entry]
 fn main() -> ! {
     let p = pac::Peripherals::take().unwrap();
@@ -278,7 +388,7 @@ fn main() -> ! {
         putc(b'.');
         delay(15_000_000);
     }
-    puts(b"\nK210 camera web server (UART WiFi, selectable res)\n");
+    puts(b"\nK210 camera web server (UART WiFi, res + denoise)\n");
 
     // camera up; keep spi_dvp_data_enable ON for good (no SPI0 WiFi to share)
     unsafe {
@@ -292,9 +402,7 @@ fn main() -> ! {
     let dvp = Dvp::new(p.DVP);
     dvp.init();
     let _ = ov2640_read_id(&dvp);
-    let cached = unsafe { core::ptr::addr_of!(FRAME.px) } as *const u32 as usize;
     dvp.set_ai_addr(None);
-    dvp.set_display_addr(Some(cached as u32)); // set once; configure_res only resizes
     dvp.set_auto(false);
     let mut cur_res = 1usize; // default QVGA (matches the page's default r=1)
     let (mut w, mut h) = configure_res(&dvp, cur_res);
@@ -377,17 +485,26 @@ fn main() -> ! {
             }
             uart_wifi::sleep_ms(12);
         }
-        let want_bmp = req[..rl].windows(4).any(|w| w == b".bmp");
+        let want_bmp = req[..rl].windows(4).any(|x| x == b".bmp");
 
         if want_bmp {
-            let r = parse_res(&req[..rl], cur_res);
+            let r = parse_digit(&req[..rl], b"?r=", cur_res, 2);
+            let d = parse_digit(&req[..rl], b"&d=", 0, 1);
             if r != cur_res {
                 let (nw, nh) = configure_res(&dvp, r); // ~185 SCCB writes + warm-up
                 w = nw;
                 h = nh;
                 cur_res = r;
             }
-            dvp.get_image(); // fresh frame
+            if d == 1 {
+                capture(&dvp, 0);
+                capture(&dvp, 1);
+                capture(&dvp, 2);
+                denoise_median(w, h);
+                destripe(w, h);
+            } else {
+                capture(&dvp, 0);
+            }
             let start = mtime_ms();
             unsafe { DBG_SENT = 0 };
             let ok = serve_bmp(w, h, &mut reply);
@@ -397,6 +514,8 @@ fn main() -> ! {
             put_dec(frame_no);
             puts(b" r");
             put_dec(cur_res as u32);
+            puts(b" d");
+            put_dec(d as u32);
             puts(if ok { b" ok " } else { b" abort " });
             put_dec(unsafe { DBG_SENT });
             puts(b"B ");
