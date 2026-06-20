@@ -17,6 +17,14 @@ REGION_ALIAS("REGION_STACK", SRAM);
 
 _stack_start = ORIGIN(SRAM) + LENGTH(SRAM);
 
+/* Dual-core: the K210 boot ROM releases BOTH harts at the entry. Allow hart 1
+   (the default _max_hart_id=0 would divert it to abort()) and give each hart its
+   own 512 KiB stack (hart N's SP = _stack_start - N*_hart_stack_size). The CAP
+   frame buffers + code sit low in SRAM (~3 MB); two 512 KiB stacks at the 6 MB
+   top stay clear of them. */
+_max_hart_id = 1;
+_hart_stack_size = 0x80000;
+
 /* K210 SRAM is at 0x8000_0000 (= 2^31). libcore ships `.eh_frame`, which
    riscv-rt's link.x never places; rust-lld then drops it as an orphan at a low
    address and its 32-bit PC-relative relocations into .text overflow 2 GiB.

@@ -58,6 +58,54 @@ static mut CAP: [Frame; 3] = [
 // (w, h) per resolution index 0/1/2.
 const RES: [(usize, usize); 3] = [(160, 120), (320, 240), (640, 480)];
 
+// ---- dual-core (hart 0 = main/server, hart 1 = JPEG co-worker) --------------------
+// The two K210 cores have NO L1 cache coherency, so every field shared between them is
+// read/written through the UNCACHED alias (cached_addr - 0x4000_0000) which bypasses
+// both L1s. SHARED is a plain [u32] indexed by the S_* field ids below.
+static mut SHARED: [u32; 16] = [0; 16];
+const S_READY: usize = 0; // hart0 -> hart1: full init done, worker may run
+const S_STATE: usize = 1; // job handshake: 0 idle, 1 go, 2 done
+const S_FB: usize = 2; // source frame (uncached ptr, low 32 bits of the 0x40.. alias)
+const S_W: usize = 3;
+const S_H: usize = 4;
+const S_MCY0: usize = 5; // MCU-row range [mcy0, mcy1) for hart 1
+const S_MCY1: usize = 6;
+const S_OUT: usize = 7; // hart1 entropy output (uncached ptr)
+const S_OUTCAP: usize = 8; // output capacity (bytes)
+const S_LEN: usize = 9; // hart1 -> hart0: bytes written
+const S_HEARTBEAT: usize = 10; // hart1 liveness counter
+const S_OVF: usize = 11; // hart1 -> hart0: output overflowed
+
+#[inline]
+fn shared_base() -> *mut u32 {
+    (core::ptr::addr_of!(SHARED) as usize - UNCACHED_OFFSET) as *mut u32
+}
+#[inline]
+fn sld(i: usize) -> u32 {
+    unsafe { core::ptr::read_volatile(shared_base().add(i)) }
+}
+#[inline]
+fn sst(i: usize, v: u32) {
+    unsafe { core::ptr::write_volatile(shared_base().add(i), v) }
+}
+#[inline]
+fn fence() {
+    unsafe { core::arch::asm!("fence") }
+}
+#[inline]
+fn hartid() -> usize {
+    let id: usize;
+    unsafe { core::arch::asm!("csrr {}, mhartid", out(reg) id) };
+    id
+}
+
+// riscv-rt parks every non-boot hart in a wfi loop by default; returning here lets
+// hart 1 fall through to main() (true on hart 0 = it also does .bss/.data init).
+#[export_name = "_mp_hook"]
+pub extern "Rust" fn mp_hook(hartid: usize) -> bool {
+    hartid == 0
+}
+
 fn putc(c: u8) {
     unsafe {
         while core::ptr::read_volatile(UARTHS_TXDATA) & 0x8000_0000 != 0 {}
@@ -124,7 +172,7 @@ fn le32(out: &mut [u8], v: u32) {
 // Resolution picker + denoise toggle + live <img> reload. Each control updates r/d;
 // the loop re-requests /cam.bmp?r=<r>&d=<d> on load (cache-busted) so the stream just
 // runs as fast as frames serve.
-const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title><meta name=viewport content=\"width=device-width,initial-scale=1\"></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><button id=\"r0\" onclick=\"S(0)\">QQVGA</button> <button id=\"r1\" onclick=\"S(1)\">QVGA</button> <button id=\"r2\" onclick=\"S(2)\">VGA</button></div><div style=\"margin-top:4px\"><button id=\"f0\" onclick=\"F(0)\">BMP</button> <button id=\"f1\" onclick=\"F(1)\">JPEG sw</button> <button id=\"f2\" onclick=\"F(2)\">JPEG cam</button> &nbsp; <button id=\"db\" onclick=\"D()\">Denoise OFF</button> <button id=\"eb\" onclick=\"E()\">RGB565 OFF</button></div><div style=\"margin-top:8px\"><canvas id=\"c\" style=\"width:640px;max-width:98vw;image-rendering:pixelated\"></canvas></div><p id=\"s\">connecting...</p><div style=\"margin:6px\"><input id=\"u\" readonly style=\"width:90%;max-width:600px;background:#222;color:#9f9;border:1px solid #444;padding:4px;font-family:monospace\"> <button onclick=\"C()\">Copy URL</button></div><p>BMP=lossless RGB565 (RGB565 toggle: ESP32 expands, 33% less UART). JPEG sw=on-chip software encode (clean, ~10-20x smaller, any res). JPEG cam=OV2640 hardware codec (often colour-shifts on this board). Denoise=median+destripe.</p><script>var r=1,fmt=0,d=0,e=0,n=0,t0=0;function g(i){return document.getElementById(i)}function url(){if(fmt==2)return location.origin+'/cam.jpg';var rs=['qqvga','qvga','vga'][r];if(fmt==1)return location.origin+'/'+rs+'.jpg'+(d?'?d=1':'');var q=[];if(d)q.push('d=1');if(e)q.push('e=1');return location.origin+'/'+rs+'.bmp'+(q.length?'?'+q.join('&'):'')}function upd(){var i;for(i=0;i<3;i++)g('r'+i).style.background=(fmt!=2&&r==i)?'#383':'';for(i=0;i<3;i++)g('f'+i).style.background=fmt==i?'#383':'';var db=g('db'),eb=g('eb'),dok=fmt!=2,eok=fmt==0;db.disabled=!dok;db.style.opacity=dok?1:.4;db.style.background=(dok&&d)?'#383':'#555';db.textContent='Denoise '+(d?'ON':'OFF');eb.disabled=!eok;eb.style.opacity=eok?1:.4;eb.style.background=(eok&&e)?'#383':'#555';eb.textContent='RGB565 '+(e?'ON':'OFF');g('u').value=url()}function C(){var u=g('u');u.focus();u.select();u.setSelectionRange(0,99999);try{document.execCommand('copy')}catch(z){}}function S(x){r=x;if(fmt==2)fmt=0;n=0;t0=0;upd()}function F(x){fmt=x;n=0;t0=0;upd()}function D(){if(fmt!=2){d=d?0:1;n=0;t0=0;upd()}}function E(){if(fmt==0){e=e?0:1;n=0;t0=0;upd()}}function L(){var im=new Image();im.onload=function(){var c=g('c');c.width=im.naturalWidth;c.height=im.naturalHeight;c.getContext('2d').drawImage(im,0,0);n++;var s=(fmt==2?'JPEGcam':['QQVGA','QVGA','VGA'][r]+(fmt==1?' JPEGsw':' BMP')+(d?' +dn':'')+(e&&fmt==0?' +565':''))+'  frame '+n;if(n<2){t0=Date.now()}else{s+='  ('+((n-1)*1000/(Date.now()-t0)).toFixed(2)+' fps)'}g('s').textContent=s;setTimeout(L,40)};im.onerror=function(){setTimeout(L,800)};var u=url();im.src=u+(u.indexOf('?')<0?'?':'&')+'t='+Date.now()}upd();L()</script></body></html>";
+const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title><meta name=viewport content=\"width=device-width,initial-scale=1\"></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><button id=\"r0\" onclick=\"S(0)\">QQVGA</button> <button id=\"r1\" onclick=\"S(1)\">QVGA</button> <button id=\"r2\" onclick=\"S(2)\">VGA</button></div><div style=\"margin-top:4px\"><button id=\"f0\" onclick=\"F(0)\">BMP</button> <button id=\"f1\" onclick=\"F(1)\">JPEG sw</button> <button id=\"f2\" onclick=\"F(2)\">JPEG cam</button> &nbsp; <button id=\"db\" onclick=\"D()\">Denoise OFF</button> <button id=\"eb\" onclick=\"E()\">RGB565 OFF</button> <button id=\"tb\" onclick=\"T()\">2-core OFF</button></div><div style=\"margin-top:8px\"><canvas id=\"c\" style=\"width:640px;max-width:98vw;image-rendering:pixelated\"></canvas></div><p id=\"s\">connecting...</p><div style=\"margin:6px\"><input id=\"u\" readonly style=\"width:90%;max-width:600px;background:#222;color:#9f9;border:1px solid #444;padding:4px;font-family:monospace\"> <button onclick=\"C()\">Copy URL</button></div><p>BMP=lossless RGB565 (RGB565 toggle: ESP32 expands, 33% less UART). JPEG sw=on-chip software encode (clean, ~10-20x smaller, any res). JPEG cam=OV2640 hardware codec (often colour-shifts on this board). Denoise=median+destripe. 2-core=both K210 cores encode halves in parallel (one RST marker, ~1.8x faster, JPEG sw only).</p><script>var r=1,fmt=0,d=0,e=0,t=0,n=0,t0=0;function g(i){return document.getElementById(i)}function url(){if(fmt==2)return location.origin+'/cam.jpg';var rs=['qqvga','qvga','vga'][r];if(fmt==1){var qj=[];if(d)qj.push('d=1');if(t)qj.push('2=1');return location.origin+'/'+rs+'.jpg'+(qj.length?'?'+qj.join('&'):'')}var q=[];if(d)q.push('d=1');if(e)q.push('e=1');return location.origin+'/'+rs+'.bmp'+(q.length?'?'+q.join('&'):'')}function upd(){var i;for(i=0;i<3;i++)g('r'+i).style.background=(fmt!=2&&r==i)?'#383':'';for(i=0;i<3;i++)g('f'+i).style.background=fmt==i?'#383':'';var db=g('db'),eb=g('eb'),dok=fmt!=2,eok=fmt==0;db.disabled=!dok;db.style.opacity=dok?1:.4;db.style.background=(dok&&d)?'#383':'#555';db.textContent='Denoise '+(d?'ON':'OFF');eb.disabled=!eok;eb.style.opacity=eok?1:.4;eb.style.background=(eok&&e)?'#383':'#555';eb.textContent='RGB565 '+(e?'ON':'OFF');var tb=g('tb'),tok=fmt==1;tb.disabled=!tok;tb.style.opacity=tok?1:.4;tb.style.background=(tok&&t)?'#383':'#555';tb.textContent='2-core '+(t?'ON':'OFF');g('u').value=url()}function C(){var u=g('u');u.focus();u.select();u.setSelectionRange(0,99999);try{document.execCommand('copy')}catch(z){}}function S(x){r=x;if(fmt==2)fmt=0;n=0;t0=0;upd()}function F(x){fmt=x;n=0;t0=0;upd()}function D(){if(fmt!=2){d=d?0:1;n=0;t0=0;upd()}}function E(){if(fmt==0){e=e?0:1;n=0;t0=0;upd()}}function T(){if(fmt==1){t=t?0:1;n=0;t0=0;upd()}}function L(){var im=new Image();im.onload=function(){var c=g('c');c.width=im.naturalWidth;c.height=im.naturalHeight;c.getContext('2d').drawImage(im,0,0);n++;var s=(fmt==2?'JPEGcam':['QQVGA','QVGA','VGA'][r]+(fmt==1?' JPEGsw':' BMP')+(d?' +dn':'')+(e&&fmt==0?' +565':'')+(t&&fmt==1?' x2':''))+'  frame '+n;if(n<2){t0=Date.now()}else{s+='  ('+((n-1)*1000/(Date.now()-t0)).toFixed(2)+' fps)'}g('s').textContent=s;setTimeout(L,40)};im.onerror=function(){setTimeout(L,800)};var u=url();im.src=u+(u.indexOf('?')<0?'?':'&')+'t='+Date.now()}upd();L()</script></body></html>";
 
 fn sysctl() -> *const pac::sysctl::RegisterBlock {
     pac::SYSCTL::ptr()
@@ -447,26 +495,92 @@ fn serve_bmp(w: usize, h: usize, expand565: bool, reply: &mut [u8]) -> bool {
 // UART, so it's always clean, any resolution, ~10-20x smaller than the BMP. See
 // src/jpeg.rs (baseline 4:2:0 integer-DCT encoder).
 
+/// Dual-core encode: hart 1 entropy-codes the bottom half of the MCU rows into CAP[2]
+/// (uncached) while hart 0 writes the headers + top half into CAP[1] (uncached); the two
+/// segments are joined by one RST0 restart marker (DRI in the header). Returns the JPEG
+/// length in CAP[1], or None on overflow. Halving the dominant cost (entropy + DCT) is
+/// the win; the restart marker keeps the output a standard JPEG.
+fn encode_dual(w: usize, h: usize, out: &mut [u8]) -> Option<usize> {
+    let mcx = (w + 15) / 16;
+    let mcy = (h + 15) / 16;
+    let mcy_top = (mcy + 1) / 2; // hart 0 does [0, mcy_top); hart 1 does [mcy_top, mcy)
+    let ri = (mcx * mcy_top) as u16; // restart interval = MCUs in the first segment
+
+    // Flush so no stale dirty line of hart 0's (incl. a prior single-core cached copy in
+    // CAP[2]) can flush over hart 1's uncached output mid-job, then post the job.
+    flush_l1();
+    sst(S_FB, cap_uncached(0) as usize as u32);
+    sst(S_W, w as u32);
+    sst(S_H, h as u32);
+    sst(S_MCY0, mcy_top as u32);
+    sst(S_MCY1, mcy as u32);
+    sst(S_OUT, cap_uncached(2) as usize as u32);
+    sst(S_OUTCAP, (MAXW * MAXH / 2 * 4) as u32);
+    sst(S_LEN, 0);
+    sst(S_OVF, 0);
+    fence();
+    sst(S_STATE, 1); // go, hart 1
+    fence();
+
+    // hart 0: headers (with DRI) + top segment into CAP[1].
+    let start = jpeg::write_headers(out, w, h, ri);
+    let len0 = jpeg::encode_segment(cap_uncached(0) as *const u32, w, h, 0, mcy_top, &mut out[start..])?;
+    let mut p = start + len0;
+    out[p] = 0xFF;
+    out[p + 1] = 0xD0; // RST0 between the two segments
+    p += 2;
+
+    // Wait for hart 1, then append its segment + EOI.
+    while sld(S_STATE) != 2 {
+        core::hint::spin_loop();
+    }
+    fence();
+    if sld(S_OVF) != 0 {
+        sst(S_STATE, 0);
+        return None;
+    }
+    let len1 = sld(S_LEN) as usize;
+    if p + len1 + 2 > out.len() {
+        sst(S_STATE, 0);
+        return None;
+    }
+    let src = unsafe { core::slice::from_raw_parts(cap_uncached(2) as *const u8, len1) };
+    out[p..p + len1].copy_from_slice(src);
+    p += len1;
+    out[p] = 0xFF;
+    out[p + 1] = 0xD9; // EOI
+    p += 2;
+    sst(S_STATE, 0); // idle, ready for the next job
+    Some(p)
+}
+
 /// Encode CAP[0] (w x h RGB565) to JPEG into CAP[1] (free, 614 KB) and serve it as
-/// image/jpeg. Returns (ok, jpeg_len).
-fn serve_swjpeg(w: usize, h: usize, reply: &mut [u8]) -> (bool, usize, u64) {
+/// image/jpeg. `dual` runs the two-core split encoder. Returns (ok, jpeg_len, enc_ms).
+fn serve_swjpeg(w: usize, h: usize, dual: bool, reply: &mut [u8]) -> (bool, usize, u64) {
     let out = unsafe {
         core::slice::from_raw_parts_mut(cap_uncached(1) as *mut u8, MAXW * MAXH / 2 * 4)
     };
     let t_enc = mtime_ms();
-    // Copy the frame uncached(0) -> cached(2) once. The encoder reads each pixel ~2x
-    // (luma + chroma); reading from the cached alias makes those hit L1 instead of
-    // paying the uncached-AXI latency on every access. One sequential copy (W*H/2 word
-    // reads) is far cheaper than 2*W*H scattered uncached reads.
-    let words = w * h / 2;
-    unsafe {
-        let src = core::slice::from_raw_parts(cap_uncached(0) as *const u32, words);
-        let dst = core::slice::from_raw_parts_mut(cap_cached(2) as *mut u32, words);
-        dst.copy_from_slice(src);
-    }
-    let len = match jpeg::encode(cap_cached(2) as *const u32, w, h, out) {
-        Some(n) => n,
-        None => return (false, 0, 0),
+    let len = if dual {
+        match encode_dual(w, h, out) {
+            Some(n) => n,
+            None => return (false, 0, 0),
+        }
+    } else {
+        // Copy the frame uncached(0) -> cached(2) once. The encoder reads each pixel ~2x
+        // (luma + chroma); reading from the cached alias makes those hit L1 instead of
+        // paying the uncached-AXI latency on every access. One sequential copy (W*H/2 word
+        // reads) is far cheaper than 2*W*H scattered uncached reads.
+        let words = w * h / 2;
+        unsafe {
+            let src = core::slice::from_raw_parts(cap_uncached(0) as *const u32, words);
+            let dst = core::slice::from_raw_parts_mut(cap_cached(2) as *mut u32, words);
+            dst.copy_from_slice(src);
+        }
+        match jpeg::encode(cap_cached(2) as *const u32, w, h, out) {
+            Some(n) => n,
+            None => return (false, 0, 0),
+        }
     };
     let enc_ms = mtime_ms().wrapping_sub(t_enc);
     let mut hdr = [0u8; 96];
@@ -553,8 +667,69 @@ fn serve_camjpeg(dvp: &Dvp, reply: &mut [u8]) -> (bool, usize) {
     (true, len)
 }
 
+// Distinctive "go" value for the ready gate: power-on SRAM garbage is very unlikely to
+// match it, so hart 1 won't false-start on an uninitialized read.
+const READY_MAGIC: u32 = 0xC0DE_CAFE;
+
+/// Evict hart 0's entire L1 by reading a buffer several times its size, forcing every
+/// dirty line to be written back to physical SRAM. The two cores have no cache coherency,
+/// so this guarantees hart 0's cached writes (boot-time .bss zero of SHARED, a prior
+/// single-core cached frame copy in CAP[2]) reach SRAM before hart 1 reads them uncached
+/// and can't later flush over hart 1's uncached writes. Reading 128 KiB sequentially
+/// touches every cache set many times over.
+fn flush_l1() {
+    let p = cap_cached(0) as *const u32;
+    let mut acc = 0u32;
+    let mut i = 0;
+    while i < 32 * 1024 {
+        acc = acc.wrapping_add(unsafe { core::ptr::read_volatile(p.add(i)) });
+        i += 1;
+    }
+    sst(S_HEARTBEAT, acc | 1); // sink the read (and prove liveness path is exercised)
+}
+
+/// Hart 1 entry. Must NOT touch any peripheral hart 0 owns (it never calls
+/// `Peripherals::take`). Waits for the ready gate, then services JPEG segment jobs: each
+/// job entropy-codes an MCU-row range of the source frame into a caller-given buffer.
+/// All source reads and output writes go through uncached pointers hart 0 hands over.
+fn core1_main() -> ! {
+    while sld(S_READY) != READY_MAGIC {
+        core::hint::spin_loop();
+    }
+    sst(S_HEARTBEAT, 1); // tell hart 0 we're past the gate
+    loop {
+        while sld(S_STATE) != 1 {
+            core::hint::spin_loop();
+        }
+        fence();
+        let fb = sld(S_FB) as usize as *const u32;
+        let w = sld(S_W) as usize;
+        let h = sld(S_H) as usize;
+        let mcy0 = sld(S_MCY0) as usize;
+        let mcy1 = sld(S_MCY1) as usize;
+        let out = unsafe {
+            core::slice::from_raw_parts_mut(sld(S_OUT) as usize as *mut u8, sld(S_OUTCAP) as usize)
+        };
+        match jpeg::encode_segment(fb, w, h, mcy0, mcy1, out) {
+            Some(n) => {
+                sst(S_LEN, n as u32);
+                sst(S_OVF, 0);
+            }
+            None => {
+                sst(S_LEN, 0);
+                sst(S_OVF, 1);
+            }
+        }
+        fence();
+        sst(S_STATE, 2); // done
+    }
+}
+
 #[entry]
 fn main() -> ! {
+    if hartid() != 0 {
+        core1_main();
+    }
     let p = pac::Peripherals::take().unwrap();
     let mut sc = p.SYSCTL.constrain();
     let fpioa = p.FPIOA.split(&mut sc.apb0);
@@ -650,6 +825,22 @@ fn main() -> ! {
     uart_wifi::cmd(uart_wifi::CMD_LISTEN, &port, &mut reply, 2000);
     puts(b"server up\n");
 
+    // Release hart 1 now that init is done. Flush first so the boot-time cached zero of
+    // SHARED has reached physical SRAM and can't clobber the magic we write uncached.
+    sst(S_STATE, 0);
+    flush_l1();
+    sst(S_READY, READY_MAGIC);
+    fence();
+    let mut alive = false;
+    for _ in 0..50 {
+        if sld(S_HEARTBEAT) == 1 {
+            alive = true;
+            break;
+        }
+        uart_wifi::sleep_ms(10);
+    }
+    puts(if alive { b"core1 ready\n" } else { b"core1 NOT ready\n" });
+
     let mut frame_no = 0u32;
     loop {
         let connected = matches!(
@@ -726,6 +917,7 @@ fn main() -> ! {
             };
             let d = flag(rs, b"?d=", b"&d=");
             let e = flag(rs, b"?e=", b"&e="); // RGB565-direct (BMP only)
+            let two = flag(rs, b"?2=", b"&2="); // dual-core encode (JPEG sw only)
             if r != cur_res {
                 let (nw, nh) = configure_res(&dvp, r); // ~185 SCCB writes + warm-up
                 w = nw;
@@ -744,7 +936,7 @@ fn main() -> ! {
             frame_no += 1;
             let start = mtime_ms();
             if is_swjpg {
-                let (ok, len, enc_ms) = serve_swjpeg(w, h, &mut reply); // CAP[1]=output
+                let (ok, len, enc_ms) = serve_swjpeg(w, h, two == 1, &mut reply); // CAP[1]=output
                 let ms = mtime_ms().wrapping_sub(start);
                 puts(b"frame ");
                 put_dec(frame_no);
@@ -752,6 +944,7 @@ fn main() -> ! {
                 put_dec(cur_res as u32);
                 puts(b" d");
                 put_dec(d as u32);
+                puts(if two == 1 { b" x2" } else { b" x1" });
                 puts(if ok { b" SWJPG " } else { b" SWJPG-FAIL " });
                 put_dec(len as u32);
                 puts(b"B enc");

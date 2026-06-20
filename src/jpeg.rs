@@ -256,11 +256,17 @@ fn seg(out: &mut [u8], p: &mut usize, marker: u8, body: &[u8]) {
     }
 }
 
-fn write_headers(out: &mut [u8], w: usize, h: usize) -> usize {
+/// Write the JFIF headers up to (and including) SOS. `ri` is the restart interval in
+/// MCUs (0 = no DRI segment / no restart markers). Returns the byte offset where the
+/// entropy-coded scan begins.
+pub fn write_headers(out: &mut [u8], w: usize, h: usize, ri: u16) -> usize {
     let mut p = 0usize;
     w8(out, &mut p, 0xFF);
     w8(out, &mut p, 0xD8); // SOI
     seg(out, &mut p, 0xE0, &[b'J', b'F', b'I', b'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0]); // APP0/JFIF
+    if ri != 0 {
+        seg(out, &mut p, 0xDD, &[(ri >> 8) as u8, ri as u8]); // DRI (restart interval)
+    }
     // DQT luma (id 0) + chroma (id 1), each in zigzag order
     let mut qz = [0u8; 65];
     qz[0] = 0x00;
@@ -310,13 +316,24 @@ fn write_dht(out: &mut [u8], p: &mut usize, cls: u8, bits: &[u8; 16], vals: &[u8
     }
 }
 
-/// Encode the `w`x`h` RGB565 frame at `fb` (uncached) into `out` as a JPEG.
-/// Returns the byte length, or None if `out` was too small.
-pub fn encode(fb: *const u32, w: usize, h: usize, out: &mut [u8]) -> Option<usize> {
-    let start = write_headers(out, w, h);
-    let mut bw = BitW { buf: out, pos: start, acc: 0, n: 0, overflow: false };
+/// Entropy-code MCU rows `[mcy0, mcy1)` of the `w`x`h` RGB565 frame at `fb` into `out`
+/// (which is just the scan region, written from offset 0). DC predictors start at 0, so
+/// the output is a self-contained restart segment; it is flushed to a byte boundary.
+/// Returns the byte length, or None on overflow. Splitting an image into row-ranges and
+/// concatenating their segments with RST markers (see `encode` for single-segment) lets
+/// the two cores encode halves in parallel.
+pub fn encode_segment(
+    fb: *const u32,
+    w: usize,
+    h: usize,
+    mcy0: usize,
+    mcy1: usize,
+    out: &mut [u8],
+) -> Option<usize> {
+    let cap = out.len();
+    let mut bw = BitW { buf: out, pos: 0, acc: 0, n: 0, overflow: false };
     let (mut dc_y, mut dc_cb, mut dc_cr) = (0i32, 0i32, 0i32);
-    // reciprocals once per frame (round(2^16/quant)); turns the per-coeff divide into
+    // reciprocals once per segment (round(2^16/quant)); turns the per-coeff divide into
     // a multiply + shift.
     let mut recip_l = [0i32; 64];
     let mut recip_c = [0i32; 64];
@@ -325,8 +342,7 @@ pub fn encode(fb: *const u32, w: usize, h: usize, out: &mut [u8]) -> Option<usiz
         recip_c[i] = (65536 + QUANT_C[i] as i32 / 2) / QUANT_C[i] as i32;
     }
     let mcx = (w + 15) / 16;
-    let mcy = (h + 15) / 16;
-    for my in 0..mcy {
+    for my in mcy0..mcy1 {
         for mx in 0..mcx {
             // four 8x8 luma blocks
             for by in 0..2 {
@@ -370,11 +386,23 @@ pub fn encode(fb: *const u32, w: usize, h: usize, out: &mut [u8]) -> Option<usiz
         }
     }
     bw.flush();
-    let mut p = bw.pos;
-    let of = bw.overflow;
+    if bw.overflow || bw.pos > cap {
+        None
+    } else {
+        Some(bw.pos)
+    }
+}
+
+/// Single-core convenience: full JPEG (headers + one scan segment + EOI) of the whole
+/// `w`x`h` frame at `fb` into `out`. Returns the byte length, or None if `out` was too small.
+pub fn encode(fb: *const u32, w: usize, h: usize, out: &mut [u8]) -> Option<usize> {
+    let start = write_headers(out, w, h, 0);
+    let mcy = (h + 15) / 16;
+    let n = encode_segment(fb, w, h, 0, mcy, &mut out[start..])?;
+    let mut p = start + n;
     w8(out, &mut p, 0xFF);
     w8(out, &mut p, 0xD9); // EOI
-    if of || p > out.len() {
+    if p > out.len() {
         None
     } else {
         Some(p)
