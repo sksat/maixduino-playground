@@ -18,13 +18,13 @@
 #![no_main]
 
 mod dvp;
+mod jpeg;
 mod uart_wifi;
 
 use panic_halt as _;
 
 use dvp::{
-    ov2640_init, ov2640_jpeg_qvga, ov2640_read_id, ov2640_rgb565_qqvga, ov2640_rgb565_vga, Dvp,
-    ImageFormat,
+    ov2640_init, ov2640_read_id, ov2640_rgb565_qqvga, ov2640_rgb565_vga, Dvp, ImageFormat,
 };
 use k210_hal::fpioa;
 use k210_hal::pac;
@@ -124,7 +124,7 @@ fn le32(out: &mut [u8], v: u32) {
 // Resolution picker + denoise toggle + live <img> reload. Each control updates r/d;
 // the loop re-requests /cam.bmp?r=<r>&d=<d> on load (cache-busted) so the stream just
 // runs as fast as frames serve.
-const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title><meta name=viewport content=\"width=device-width,initial-scale=1\"></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><button id=\"r0\" onclick=\"S(0)\">QQVGA</button> <button id=\"r1\" onclick=\"S(1)\">QVGA</button> <button id=\"r2\" onclick=\"S(2)\">VGA</button> <button id=\"jb\" onclick=\"J()\">JPEG</button> &nbsp; <button id=\"db\" onclick=\"D()\">Denoise: OFF</button> <button id=\"eb\" onclick=\"E()\">RGB565: OFF</button></div><div style=\"margin-top:8px\"><canvas id=\"c\" style=\"width:640px;max-width:98vw;image-rendering:pixelated\"></canvas></div><p id=\"s\">connecting...</p><div style=\"margin:6px\"><input id=\"u\" readonly style=\"width:90%;max-width:600px;background:#222;color:#9f9;border:1px solid #444;padding:4px;font-family:monospace\"> <button onclick=\"C()\">Copy URL</button> <span style=\"opacity:.6\">(curl this to keep grabbing this mode)</span></div><p>BMP = lossless RGB565. Denoise = median + destripe. RGB565 = send 2 B/px and let the ESP32 expand (33% less UART, lossless). JPEG = OV2640 hardware codec (~8 KB, fast) -- some frames colour-shift (DVP error on a DC coeff, no restart markers).</p><script>var r=1,d=0,e=0,j=0,n=0,t0=Date.now();function g(i){return document.getElementById(i)}function url(){if(j)return location.origin+'/cam.jpg';var p=['qqvga','qvga','vga'][r]+'.bmp',q=[];if(d)q.push('d=1');if(e)q.push('e=1');return location.origin+'/'+p+(q.length?'?'+q.join('&'):'')}function upd(){var b=!j,i;for(i=0;i<3;i++)g('r'+i).style.background=(b&&r==i)?'#383':'';g('jb').style.background=j?'#383':'';var x=g('db'),y=g('eb');x.disabled=y.disabled=!b;x.style.opacity=y.style.opacity=b?1:.4;x.style.background=(b&&d)?'#383':'#555';y.style.background=(b&&e)?'#383':'#555';x.textContent='Denoise '+(d?'ON':'OFF');y.textContent='RGB565 '+(e?'ON':'OFF');g('u').value=url()}function C(){var u=g('u');u.focus();u.select();u.setSelectionRange(0,99999);try{document.execCommand('copy')}catch(z){}}function S(x){r=x;j=0;n=0;t0=Date.now();upd()}function J(){j=1;n=0;t0=Date.now();upd()}function D(){if(!j){d=d?0:1;n=0;t0=Date.now();upd()}}function E(){if(!j){e=e?0:1;n=0;t0=Date.now();upd()}}function L(){var im=new Image();im.onload=function(){var c=g('c');c.width=im.naturalWidth;c.height=im.naturalHeight;c.getContext('2d').drawImage(im,0,0);n++;var s=(j?'JPEG QVGA':['QQVGA','QVGA','VGA'][r]+(d?' +denoise':'')+(e?' +RGB565':''))+'  frame '+n;if(n<2){t0=Date.now()}else{s+='  ('+((n-1)*1000/(Date.now()-t0)).toFixed(2)+' fps)'}g('s').textContent=s;setTimeout(L,40)};im.onerror=function(){setTimeout(L,800)};var u=url();im.src=u+(u.indexOf('?')<0?'?':'&')+'t='+Date.now()}upd();L()</script></body></html>";
+const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title><meta name=viewport content=\"width=device-width,initial-scale=1\"></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><button id=\"r0\" onclick=\"S(0)\">QQVGA</button> <button id=\"r1\" onclick=\"S(1)\">QVGA</button> <button id=\"r2\" onclick=\"S(2)\">VGA</button></div><div style=\"margin-top:4px\"><button id=\"f0\" onclick=\"F(0)\">BMP</button> <button id=\"f1\" onclick=\"F(1)\">JPEG sw</button> <button id=\"f2\" onclick=\"F(2)\">JPEG cam</button> &nbsp; <button id=\"db\" onclick=\"D()\">Denoise OFF</button> <button id=\"eb\" onclick=\"E()\">RGB565 OFF</button></div><div style=\"margin-top:8px\"><canvas id=\"c\" style=\"width:640px;max-width:98vw;image-rendering:pixelated\"></canvas></div><p id=\"s\">connecting...</p><div style=\"margin:6px\"><input id=\"u\" readonly style=\"width:90%;max-width:600px;background:#222;color:#9f9;border:1px solid #444;padding:4px;font-family:monospace\"> <button onclick=\"C()\">Copy URL</button></div><p>BMP=lossless RGB565 (RGB565 toggle: ESP32 expands, 33% less UART). JPEG sw=on-chip software encode (clean, ~10-20x smaller, any res). JPEG cam=OV2640 hardware codec (often colour-shifts on this board). Denoise=median+destripe.</p><script>var r=1,fmt=0,d=0,e=0,n=0,t0=0;function g(i){return document.getElementById(i)}function url(){if(fmt==2)return location.origin+'/cam.jpg';var rs=['qqvga','qvga','vga'][r];if(fmt==1)return location.origin+'/'+rs+'.jpg'+(d?'?d=1':'');var q=[];if(d)q.push('d=1');if(e)q.push('e=1');return location.origin+'/'+rs+'.bmp'+(q.length?'?'+q.join('&'):'')}function upd(){var i;for(i=0;i<3;i++)g('r'+i).style.background=(fmt!=2&&r==i)?'#383':'';for(i=0;i<3;i++)g('f'+i).style.background=fmt==i?'#383':'';var db=g('db'),eb=g('eb'),dok=fmt!=2,eok=fmt==0;db.disabled=!dok;db.style.opacity=dok?1:.4;db.style.background=(dok&&d)?'#383':'#555';db.textContent='Denoise '+(d?'ON':'OFF');eb.disabled=!eok;eb.style.opacity=eok?1:.4;eb.style.background=(eok&&e)?'#383':'#555';eb.textContent='RGB565 '+(e?'ON':'OFF');g('u').value=url()}function C(){var u=g('u');u.focus();u.select();u.setSelectionRange(0,99999);try{document.execCommand('copy')}catch(z){}}function S(x){r=x;if(fmt==2)fmt=0;n=0;t0=0;upd()}function F(x){fmt=x;n=0;t0=0;upd()}function D(){if(fmt!=2){d=d?0:1;n=0;t0=0;upd()}}function E(){if(fmt==0){e=e?0:1;n=0;t0=0;upd()}}function L(){var im=new Image();im.onload=function(){var c=g('c');c.width=im.naturalWidth;c.height=im.naturalHeight;c.getContext('2d').drawImage(im,0,0);n++;var s=(fmt==2?'JPEGcam':['QQVGA','QVGA','VGA'][r]+(fmt==1?' JPEGsw':' BMP')+(d?' +dn':'')+(e&&fmt==0?' +565':''))+'  frame '+n;if(n<2){t0=Date.now()}else{s+='  ('+((n-1)*1000/(Date.now()-t0)).toFixed(2)+' fps)'}g('s').textContent=s;setTimeout(L,40)};im.onerror=function(){setTimeout(L,800)};var u=url();im.src=u+(u.indexOf('?')<0?'?':'&')+'t='+Date.now()}upd();L()</script></body></html>";
 
 fn sysctl() -> *const pac::sysctl::RegisterBlock {
     pac::SYSCTL::ptr()
@@ -439,18 +439,47 @@ fn serve_bmp(w: usize, h: usize, expand565: bool, reply: &mut [u8]) -> bool {
     pipe.flush(reply)
 }
 
-// ---- JPEG spike (option 2): OV2640 hardware JPEG over UART ----------------------
-// Tests whether the hardware JPEG is usable on this board's DVP (which has ~1 random
-// byte error per 15-30 KB). UXGA JPEG is the only config proven to capture cleanly
-// (VGA JPEG hung the DVP frame-sync historically). The capture buffer = full CAP[0].
-const JCAP_WORDS: usize = MAXW * MAXH / 2; // 614 KB capacity for the JPEG byte stream
+// ---- software JPEG (encode the captured RGB565 frame on-chip) -------------------
+// The camera's HARDWARE JPEG was a dead end on this board (DVP byte errors + no
+// restart markers corrupt it; see esp32-modem/.. and the memory). Instead we encode
+// JPEG in software from the already-captured (and optionally denoised) clean frame:
+// the byte stream is computed on-chip and sent byte-exact over the flow-controlled
+// UART, so it's always clean, any resolution, ~10-20x smaller than the BMP. See
+// src/jpeg.rs (baseline 4:2:0 integer-DCT encoder).
 
-/// Configure the OV2640 for JPEG (QVGA 320x240) output + a DVP geometry big enough to
-/// hold it. QVGA JPEG is ~few KB, so far more likely to be free of DVP byte errors
-/// than the ~105 KB UXGA stream -- this is the clean-rate spike.
+/// Encode CAP[0] (w x h RGB565) to JPEG into CAP[1] (free, 614 KB) and serve it as
+/// image/jpeg. Returns (ok, jpeg_len).
+fn serve_swjpeg(w: usize, h: usize, reply: &mut [u8]) -> (bool, usize, u64) {
+    let out = unsafe {
+        core::slice::from_raw_parts_mut(cap_uncached(1) as *mut u8, MAXW * MAXH / 2 * 4)
+    };
+    let t_enc = mtime_ms();
+    let len = match jpeg::encode(cap_uncached(0) as *const u32, w, h, out) {
+        Some(n) => n,
+        None => return (false, 0, 0),
+    };
+    let enc_ms = mtime_ms().wrapping_sub(t_enc);
+    let mut hdr = [0u8; 96];
+    let mut n = 0;
+    n += append(&mut hdr, n, b"HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: ");
+    n += write_dec(&mut hdr[n..], len as u32);
+    n += append(&mut hdr, n, b"\r\nConnection: close\r\n\r\n");
+    if !send_all(uart_wifi::CMD_SEND, &hdr[..n], reply) {
+        return (false, len, enc_ms);
+    }
+    let ok = send_all(uart_wifi::CMD_SEND, &out[..len], reply);
+    (ok, len, enc_ms)
+}
+
+// ---- camera HARDWARE JPEG (OV2640) -- kept as a selectable curiosity (/cam.jpg) ----
+// Mostly corrupted on this board (DVP byte errors + the OV2640 emits no restart
+// markers -> a byte error on a DC coeff tints the whole frame; ~30% of frames clean).
+// The software encoder (serve_swjpeg) is the clean path; this is for comparison.
+const JCAP_WORDS: usize = MAXW * MAXH / 2;
+
 fn configure_jpeg(dvp: &Dvp) {
-    ov2640_jpeg_qvga(dvp);
-    dvp.set_image_format(ImageFormat::RGB); // DVP just grabs the byte stream
+    dvp::ov2640_jpeg_qvga(dvp);
+    dvp.set_image_format(ImageFormat::RGB);
     dvp.set_image_size(false, MAXW as u16, MAXH as u16);
     let t_end = mtime_ms() + 2000;
     while mtime_ms() < t_end {
@@ -458,23 +487,20 @@ fn configure_jpeg(dvp: &Dvp) {
     }
 }
 
-/// Capture a JPEG into CAP[0], byte-swap so the stream is contiguous, find SOI..EOI,
-/// and serve it as image/jpeg. Returns (found, jpeg_len). The DVP packs the byte
-/// stream big-endian within each 32-bit word, so swap_bytes() makes CAP[0] a plain
-/// contiguous JPEG byte array.
-fn serve_jpeg(dvp: &Dvp, reply: &mut [u8]) -> (bool, usize) {
+/// Capture the OV2640 hardware JPEG into CAP[0], byte-swap to a contiguous stream, find
+/// SOI..EOI, serve as image/jpeg. Returns (found, len).
+fn serve_camjpeg(dvp: &Dvp, reply: &mut [u8]) -> (bool, usize) {
     capture(dvp, 0);
     let buf = cap_uncached(0);
     for j in 0..JCAP_WORDS {
         unsafe {
-            let w = core::ptr::read_volatile(buf.add(j));
-            core::ptr::write_volatile(buf.add(j), w.swap_bytes());
+            let wv = core::ptr::read_volatile(buf.add(j));
+            core::ptr::write_volatile(buf.add(j), wv.swap_bytes());
         }
     }
     let bytes = cap_uncached(0) as *const u8;
     let nb = JCAP_WORDS * 4;
     let rd = |i: usize| -> u8 { unsafe { core::ptr::read_volatile(bytes.add(i)) } };
-    // SOI (FF D8)
     let mut soi = 0usize;
     let mut found = false;
     let mut i = 0;
@@ -489,7 +515,6 @@ fn serve_jpeg(dvp: &Dvp, reply: &mut [u8]) -> (bool, usize) {
     if !found {
         return (false, 0);
     }
-    // EOI (FF D9)
     let mut eoi = 0usize;
     found = false;
     let mut j = soi + 2;
@@ -649,29 +674,31 @@ fn main() -> ! {
         // toggles stay as query flags (?d=1 denoise, ?e=1 RGB565-direct). Old query
         // forms (?j=1, ?r=N) still work as a fallback.
         let rs = &req[..rl];
-        let is_jpg = contains(rs, b".jpg") || flag(rs, b"?j=", b"&j=") == 1;
+        // /cam.jpg = camera HARDWARE JPEG; /{res}.jpg = SOFTWARE JPEG; /{res}.bmp = BMP.
+        let is_camjpg = contains(rs, b"cam.jpg") || flag(rs, b"?j=", b"&j=") == 1;
+        let is_swjpg = !is_camjpg && contains(rs, b".jpg");
         let is_bmp = contains(rs, b".bmp");
 
-        if is_jpg {
-            // ---- JPEG mode (/cam.jpg) ----
+        if is_camjpg {
+            // ---- camera HARDWARE JPEG (/cam.jpg) ----
             if !cur_jpeg {
                 configure_jpeg(&dvp);
                 cur_jpeg = true;
             }
             let start = mtime_ms();
-            let (found, len) = serve_jpeg(&dvp, &mut reply);
+            let (found, len) = serve_camjpeg(&dvp, &mut reply);
             let ms = mtime_ms().wrapping_sub(start);
             frame_no += 1;
             puts(b"frame ");
             put_dec(frame_no);
-            puts(if found { b" JPG " } else { b" JPG-NOTFOUND " });
+            puts(if found { b" CAMJPG " } else { b" CAMJPG-FAIL " });
             put_dec(len as u32);
             puts(b"B ");
             put_dec(ms as u32);
             puts(b"ms\n");
-        } else if is_bmp {
+        } else if is_swjpg || is_bmp {
             if cur_jpeg {
-                let (nw, nh) = configure_res(&dvp, cur_res); // back to RGB
+                let (nw, nh) = configure_res(&dvp, cur_res); // back to RGB output
                 w = nw;
                 h = nh;
                 cur_jpeg = false;
@@ -688,7 +715,7 @@ fn main() -> ! {
                 parse_digit(rs, b"?r=", cur_res, 2)
             };
             let d = flag(rs, b"?d=", b"&d=");
-            let e = flag(rs, b"?e=", b"&e="); // RGB565-direct (ESP32 expands)
+            let e = flag(rs, b"?e=", b"&e="); // RGB565-direct (BMP only)
             if r != cur_res {
                 let (nw, nh) = configure_res(&dvp, r); // ~185 SCCB writes + warm-up
                 w = nw;
@@ -704,26 +731,44 @@ fn main() -> ! {
             } else {
                 capture(&dvp, 0);
             }
-            let start = mtime_ms();
-            unsafe { DBG_SENT = 0 };
-            let ok = serve_bmp(w, h, e == 1, &mut reply);
-            let ms = mtime_ms().wrapping_sub(start);
             frame_no += 1;
-            puts(b"frame ");
-            put_dec(frame_no);
-            puts(b" r");
-            put_dec(cur_res as u32);
-            puts(b" d");
-            put_dec(d as u32);
-            puts(b" e");
-            put_dec(e as u32);
-            puts(if ok { b" ok " } else { b" abort " });
-            put_dec(unsafe { DBG_SENT });
-            puts(b"B ");
-            put_dec(ms as u32);
-            puts(b"ms\n");
+            let start = mtime_ms();
+            if is_swjpg {
+                let (ok, len, enc_ms) = serve_swjpeg(w, h, &mut reply); // CAP[1]=output
+                let ms = mtime_ms().wrapping_sub(start);
+                puts(b"frame ");
+                put_dec(frame_no);
+                puts(b" r");
+                put_dec(cur_res as u32);
+                puts(b" d");
+                put_dec(d as u32);
+                puts(if ok { b" SWJPG " } else { b" SWJPG-FAIL " });
+                put_dec(len as u32);
+                puts(b"B enc");
+                put_dec(enc_ms as u32);
+                puts(b"ms tot");
+                put_dec(ms as u32);
+                puts(b"ms\n");
+            } else {
+                unsafe { DBG_SENT = 0 };
+                let ok = serve_bmp(w, h, e == 1, &mut reply);
+                let ms = mtime_ms().wrapping_sub(start);
+                puts(b"frame ");
+                put_dec(frame_no);
+                puts(b" r");
+                put_dec(cur_res as u32);
+                puts(b" d");
+                put_dec(d as u32);
+                puts(b" e");
+                put_dec(e as u32);
+                puts(if ok { b" ok " } else { b" abort " });
+                put_dec(unsafe { DBG_SENT });
+                puts(b"B ");
+                put_dec(ms as u32);
+                puts(b"ms\n");
+            }
         } else {
-            let mut resp = [0u8; 3072];
+            let mut resp = [0u8; 4096];
             let mut hn = 0;
             hn += append(&mut resp, hn, b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ");
             hn += write_dec(&mut resp[hn..], HTML.len() as u32);
