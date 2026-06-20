@@ -1,8 +1,8 @@
 //! Minimal baseline JPEG encoder (4:2:0, integer DCT), no_std, no alloc.
 //!
 //! Encodes an RGB565 frame into a caller-provided buffer as a JFIF JPEG. Standard quant
-//! (quality 80) + standard Huffman tables, a fixed-point 8x8 DCT (even/odd decomposition,
-//! 32 mults/pass), reciprocal quantization (multiply+shift, no divides), no restart
+//! (quality 80) + standard Huffman tables, a fixed-point 8x8 DCT (libjpeg's LL&M/Loeffler
+//! `jpeg_fdct_islow`, 12 mults/pass), reciprocal quantization (multiply+shift, no divides), no restart
 //! markers (the byte stream is clean: computed on-chip and sent byte-exact over the
 //! flow-controlled UART). The point is to shrink what crosses the UART (the bottleneck)
 //! ~10-20x; the browser decodes natively. The caller copies the frame into a cached
@@ -18,8 +18,22 @@ use core::ptr::read_volatile;
 static QUANT_L: [u8; 64] = [6,4,4,6,10,16,20,24,5,5,6,8,10,23,24,22,6,5,6,10,16,23,28,22,6,7,9,12,20,35,32,25,7,9,15,22,27,44,41,31,10,14,22,26,32,42,45,37,20,26,31,35,41,48,48,40,29,37,38,39,45,40,41,40];
 static QUANT_C: [u8; 64] = [7,7,10,19,40,40,40,40,7,8,10,26,40,40,40,40,10,10,22,40,40,40,40,40,19,26,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40,40];
 static ZIGZAG: [u8; 64] = [0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63];
-// D[u][x] = round(0.5*alpha(u)*cos((2x+1)u*pi/16) * 2^11), at index u*8+x
-static DCT_D: [i32; 64] = [724,724,724,724,724,724,724,724,1004,851,569,200,-200,-569,-851,-1004,946,392,-392,-946,-946,-392,392,946,851,-200,-1004,-569,569,1004,200,-851,724,-724,-724,724,724,-724,-724,724,569,-1004,200,851,-851,-200,1004,-569,392,-946,946,-392,-392,946,-946,392,200,-569,851,-1004,1004,-851,569,-200];
+// Loeffler-Ligtenberg-Moschytz fixed-point DCT constants (libjpeg jpeg_fdct_islow,
+// CONST_BITS=13): FIX(c) = round(c * 2^13). 12 mults/8-point vs 32 for the direct sum.
+const C_BITS: i32 = 13;
+const P1_BITS: i32 = 2;
+const F_0_298631336: i32 = 2446;
+const F_0_390180644: i32 = 3196;
+const F_0_541196100: i32 = 4433;
+const F_0_765366865: i32 = 6270;
+const F_0_899976223: i32 = 7373;
+const F_1_175875602: i32 = 9633;
+const F_1_501321110: i32 = 12299;
+const F_1_847759065: i32 = 15137;
+const F_1_961570560: i32 = 16069;
+const F_2_053119869: i32 = 16819;
+const F_2_562915447: i32 = 20995;
+const F_3_072711026: i32 = 25172;
 static DC_L: [(u16,u8); 12] = [(0,2),(2,3),(3,3),(4,3),(5,3),(6,3),(14,4),(30,5),(62,6),(126,7),(254,8),(510,9)];
 static DC_C: [(u16,u8); 12] = [(0,2),(1,2),(2,2),(6,3),(14,4),(30,5),(62,6),(126,7),(254,8),(510,9),(1022,10),(2046,11)];
 static AC_L: [(u16,u8); 251] = [(10,4),(0,2),(1,2),(4,3),(11,4),(26,5),(120,7),(248,8),(1014,10),(65410,16),(65411,16),(0,0),(0,0),(0,0),(0,0),(0,0),(0,0),(12,4),(27,5),(121,7),(502,9),(2038,11),(65412,16),(65413,16),(65414,16),(65415,16),(65416,16),(0,0),(0,0),(0,0),(0,0),(0,0),(0,0),(28,5),(249,8),(1015,10),(4084,12),(65417,16),(65418,16),(65419,16),(65420,16),(65421,16),(65422,16),(0,0),(0,0),(0,0),(0,0),(0,0),(0,0),(58,6),(503,9),(4085,12),(65423,16),(65424,16),(65425,16),(65426,16),(65427,16),(65428,16),(65429,16),(0,0),(0,0),(0,0),(0,0),(0,0),(0,0),(59,6),(1016,10),(65430,16),(65431,16),(65432,16),(65433,16),(65434,16),(65435,16),(65436,16),(65437,16),(0,0),(0,0),(0,0),(0,0),(0,0),(0,0),(122,7),(2039,11),(65438,16),(65439,16),(65440,16),(65441,16),(65442,16),(65443,16),(65444,16),(65445,16),(0,0),(0,0),(0,0),(0,0),(0,0),(0,0),(123,7),(4086,12),(65446,16),(65447,16),(65448,16),(65449,16),(65450,16),(65451,16),(65452,16),(65453,16),(0,0),(0,0),(0,0),(0,0),(0,0),(0,0),(250,8),(4087,12),(65454,16),(65455,16),(65456,16),(65457,16),(65458,16),(65459,16),(65460,16),(65461,16),(0,0),(0,0),(0,0),(0,0),(0,0),(0,0),(504,9),(32704,15),(65462,16),(65463,16),(65464,16),(65465,16),(65466,16),(65467,16),(65468,16),(65469,16),(0,0),(0,0),(0,0),(0,0),(0,0),(0,0),(505,9),(65470,16),(65471,16),(65472,16),(65473,16),(65474,16),(65475,16),(65476,16),(65477,16),(65478,16),(0,0),(0,0),(0,0),(0,0),(0,0),(0,0),(506,9),(65479,16),(65480,16),(65481,16),(65482,16),(65483,16),(65484,16),(65485,16),(65486,16),(65487,16),(0,0),(0,0),(0,0),(0,0),(0,0),(0,0),(1017,10),(65488,16),(65489,16),(65490,16),(65491,16),(65492,16),(65493,16),(65494,16),(65495,16),(65496,16),(0,0),(0,0),(0,0),(0,0),(0,0),(0,0),(1018,10),(65497,16),(65498,16),(65499,16),(65500,16),(65501,16),(65502,16),(65503,16),(65504,16),(65505,16),(0,0),(0,0),(0,0),(0,0),(0,0),(0,0),(2040,11),(65506,16),(65507,16),(65508,16),(65509,16),(65510,16),(65511,16),(65512,16),(65513,16),(65514,16),(0,0),(0,0),(0,0),(0,0),(0,0),(0,0),(65515,16),(65516,16),(65517,16),(65518,16),(65519,16),(65520,16),(65521,16),(65522,16),(65523,16),(65524,16),(0,0),(0,0),(0,0),(0,0),(0,0),(2041,11),(65525,16),(65526,16),(65527,16),(65528,16),(65529,16),(65530,16),(65531,16),(65532,16),(65533,16),(65534,16)];
@@ -89,54 +103,70 @@ fn cat(v: i32) -> (u32, u32) {
     (size, bits & ((1u32 << size) - 1))
 }
 
-/// 8-point 1D DCT via even/odd decomposition (32 mults instead of 64). Output is
-/// identical to the direct sum, so the descale and quant tables are unchanged:
-/// D[u][7-x] = (-1)^u * D[u][x], so even-u outputs use the sums and odd-u the diffs.
 #[inline]
-fn dct8(v: &[i32; 8]) -> [i32; 8] {
-    let s0 = v[0] + v[7];
-    let s1 = v[1] + v[6];
-    let s2 = v[2] + v[5];
-    let s3 = v[3] + v[4];
-    let d0 = v[0] - v[7];
-    let d1 = v[1] - v[6];
-    let d2 = v[2] - v[5];
-    let d3 = v[3] - v[4];
-    let m = |a: i32, b: i32, c: i32, d: i32, u: usize| -> i32 {
-        a * DCT_D[u * 8] + b * DCT_D[u * 8 + 1] + c * DCT_D[u * 8 + 2] + d * DCT_D[u * 8 + 3]
-    };
-    [
-        m(s0, s1, s2, s3, 0),
-        m(d0, d1, d2, d3, 1),
-        m(s0, s1, s2, s3, 2),
-        m(d0, d1, d2, d3, 3),
-        m(s0, s1, s2, s3, 4),
-        m(d0, d1, d2, d3, 5),
-        m(s0, s1, s2, s3, 6),
-        m(d0, d1, d2, d3, 7),
-    ]
+fn descale(x: i32, n: i32) -> i32 {
+    (x + (1 << (n - 1))) >> n
 }
 
-/// In-place forward 8x8 DCT (fixed-point P=11, descale after each pass).
+/// In-place forward 8x8 DCT (libjpeg's LL&M/Loeffler `jpeg_fdct_islow`): a column pass
+/// then a row pass, each the same 1D flowgraph (3 even + 9 odd = 12 mults). Pass 1 keeps
+/// `P1_BITS` extra fraction bits for accuracy; pass 2 removes them. The output is the
+/// JPEG-normalized DCT scaled by 8 (the factor is divided out in `code_block`'s quant).
 fn fdct(b: &mut [i32; 64]) {
-    let mut tmp = [0i32; 64];
+    // Pass 1: columns (stride 8), results left at scale 2^P1_BITS.
     for c in 0..8 {
-        let col = [b[c], b[8 + c], b[16 + c], b[24 + c], b[32 + c], b[40 + c], b[48 + c], b[56 + c]];
-        let o = dct8(&col);
-        for u in 0..8 {
-            tmp[u * 8 + c] = (o[u] + (1 << 10)) >> 11;
-        }
+        let (d0, d1, d2, d3) = (b[c], b[8 + c], b[16 + c], b[24 + c]);
+        let (d4, d5, d6, d7) = (b[32 + c], b[40 + c], b[48 + c], b[56 + c]);
+        let (tmp0, tmp7) = (d0 + d7, d0 - d7);
+        let (tmp1, tmp6) = (d1 + d6, d1 - d6);
+        let (tmp2, tmp5) = (d2 + d5, d2 - d5);
+        let (tmp3, tmp4) = (d3 + d4, d3 - d4);
+        let (tmp10, tmp13) = (tmp0 + tmp3, tmp0 - tmp3);
+        let (tmp11, tmp12) = (tmp1 + tmp2, tmp1 - tmp2);
+        b[c] = (tmp10 + tmp11) << P1_BITS;
+        b[32 + c] = (tmp10 - tmp11) << P1_BITS;
+        let z1 = (tmp12 + tmp13) * F_0_541196100;
+        b[16 + c] = descale(z1 + tmp13 * F_0_765366865, C_BITS - P1_BITS);
+        b[48 + c] = descale(z1 - tmp12 * F_1_847759065, C_BITS - P1_BITS);
+        let (p1, p2) = (tmp4 + tmp7, tmp5 + tmp6);
+        let (p3, p4) = (tmp4 + tmp6, tmp5 + tmp7);
+        let z5 = (p3 + p4) * F_1_175875602;
+        let q1 = p1 * -F_0_899976223;
+        let q2 = p2 * -F_2_562915447;
+        let q3 = p3 * -F_1_961570560 + z5;
+        let q4 = p4 * -F_0_390180644 + z5;
+        b[56 + c] = descale(tmp4 * F_0_298631336 + q1 + q3, C_BITS - P1_BITS);
+        b[40 + c] = descale(tmp5 * F_2_053119869 + q2 + q4, C_BITS - P1_BITS);
+        b[24 + c] = descale(tmp6 * F_3_072711026 + q2 + q3, C_BITS - P1_BITS);
+        b[8 + c] = descale(tmp7 * F_1_501321110 + q1 + q4, C_BITS - P1_BITS);
     }
-    for u in 0..8 {
-        let base = u * 8;
-        let row = [
-            tmp[base], tmp[base + 1], tmp[base + 2], tmp[base + 3],
-            tmp[base + 4], tmp[base + 5], tmp[base + 6], tmp[base + 7],
-        ];
-        let o = dct8(&row);
-        for v in 0..8 {
-            b[base + v] = (o[v] + (1 << 10)) >> 11;
-        }
+    // Pass 2: rows (stride 1), remove the P1_BITS added in pass 1.
+    for r in 0..8 {
+        let o = r * 8;
+        let (d0, d1, d2, d3) = (b[o], b[o + 1], b[o + 2], b[o + 3]);
+        let (d4, d5, d6, d7) = (b[o + 4], b[o + 5], b[o + 6], b[o + 7]);
+        let (tmp0, tmp7) = (d0 + d7, d0 - d7);
+        let (tmp1, tmp6) = (d1 + d6, d1 - d6);
+        let (tmp2, tmp5) = (d2 + d5, d2 - d5);
+        let (tmp3, tmp4) = (d3 + d4, d3 - d4);
+        let (tmp10, tmp13) = (tmp0 + tmp3, tmp0 - tmp3);
+        let (tmp11, tmp12) = (tmp1 + tmp2, tmp1 - tmp2);
+        b[o] = descale(tmp10 + tmp11, P1_BITS);
+        b[o + 4] = descale(tmp10 - tmp11, P1_BITS);
+        let z1 = (tmp12 + tmp13) * F_0_541196100;
+        b[o + 2] = descale(z1 + tmp13 * F_0_765366865, C_BITS + P1_BITS);
+        b[o + 6] = descale(z1 - tmp12 * F_1_847759065, C_BITS + P1_BITS);
+        let (p1, p2) = (tmp4 + tmp7, tmp5 + tmp6);
+        let (p3, p4) = (tmp4 + tmp6, tmp5 + tmp7);
+        let z5 = (p3 + p4) * F_1_175875602;
+        let q1 = p1 * -F_0_899976223;
+        let q2 = p2 * -F_2_562915447;
+        let q3 = p3 * -F_1_961570560 + z5;
+        let q4 = p4 * -F_0_390180644 + z5;
+        b[o + 7] = descale(tmp4 * F_0_298631336 + q1 + q3, C_BITS + P1_BITS);
+        b[o + 5] = descale(tmp5 * F_2_053119869 + q2 + q4, C_BITS + P1_BITS);
+        b[o + 3] = descale(tmp6 * F_3_072711026 + q2 + q3, C_BITS + P1_BITS);
+        b[o + 1] = descale(tmp7 * F_1_501321110 + q1 + q4, C_BITS + P1_BITS);
     }
 }
 
@@ -152,8 +182,10 @@ fn code_block(
     let mut qz = [0i32; 64];
     for i in 0..64 {
         let c = coef[i];
-        let a = if c < 0 { -c } else { c };
-        let q = (a * recip[i] + (1 << 15)) >> 16; // ~= round(|c| / quant[i])
+        let a = (if c < 0 { -c } else { c }) as i64;
+        // coef is 8x the DCT (the islow scale), so divide by 8*quant: |c| * (2^16/quant)
+        // >> 19 = |c| / (8*quant). i64 product avoids overflow on the large DC term.
+        let q = ((a * recip[i] as i64 + (1 << 18)) >> 19) as i32;
         qz[i] = if c < 0 { -q } else { q };
     }
     // DC: differential
