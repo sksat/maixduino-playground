@@ -7,8 +7,8 @@
 //! network -- there is NO ~5 s EN-reset/reconnect/re-listen dance per frame. Each
 //! request captures a FRESH frame and serves it live on a healthy connection.
 //!
-//! The page has QQVGA / QVGA / VGA buttons (`/cam.bmp?r=N`, N=0/1/2) and a Denoise
-//! toggle (`&d=1`). Denoise = per-channel temporal median of 3 frames (kills the
+//! The page has QQVGA / QVGA / VGA + format buttons (paths like `/qvga.jpg`) and a Denoise
+//! toggle (`?denoise=1`). Denoise = per-channel temporal median of 3 frames (kills the
 //! random DVP salt-pepper speckle) + per-row destripe (equalizes row brightness,
 //! kills the horizontal banding) -- both this board's DVP signal-quality artifacts.
 //!
@@ -173,10 +173,10 @@ fn le32(out: &mut [u8], v: u32) {
     out[3] = (v >> 24) as u8;
 }
 
-// Resolution picker + denoise toggle + live <img> reload. Each control updates r/d;
-// the loop re-requests /cam.bmp?r=<r>&d=<d> on load (cache-busted) so the stream just
-// runs as fast as frames serve.
-const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title><meta name=viewport content=\"width=device-width,initial-scale=1\"></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><button id=\"r0\" onclick=\"S(0)\">QQVGA</button> <button id=\"r1\" onclick=\"S(1)\">QVGA</button> <button id=\"r2\" onclick=\"S(2)\">VGA</button></div><div style=\"margin-top:4px\"><button id=\"f0\" onclick=\"F(0)\">BMP</button> <button id=\"f1\" onclick=\"F(1)\">JPEG sw</button> <button id=\"f2\" onclick=\"F(2)\">JPEG cam</button> &nbsp; <button id=\"db\" onclick=\"D()\">Denoise OFF</button> <button id=\"eb\" onclick=\"E()\">RGB565 OFF</button> <button id=\"tb\" onclick=\"T()\">2-core OFF</button></div><div style=\"margin-top:8px\"><canvas id=\"c\" style=\"width:640px;max-width:98vw;image-rendering:pixelated\"></canvas></div><p id=\"s\">connecting...</p><div style=\"margin:6px\"><input id=\"u\" readonly style=\"width:90%;max-width:600px;background:#222;color:#9f9;border:1px solid #444;padding:4px;font-family:monospace\"> <button onclick=\"C()\">Copy URL</button></div><p>BMP=lossless RGB565 (RGB565 toggle: ESP32 expands, 33% less UART). JPEG sw=on-chip software encode (clean, ~10-20x smaller, any res). JPEG cam=OV2640 hardware codec (often colour-shifts on this board). Denoise=median+destripe. 2-core=both K210 cores encode halves in parallel (one RST marker, ~1.8x faster, JPEG sw only).</p><script>var r=1,fmt=0,d=0,e=0,t=0,n=0,t0=0;function g(i){return document.getElementById(i)}function url(){if(fmt==2)return location.origin+'/cam.jpg';var rs=['qqvga','qvga','vga'][r];if(fmt==1){var qj=[];if(d)qj.push('d=1');if(t)qj.push('2=1');return location.origin+'/'+rs+'.jpg'+(qj.length?'?'+qj.join('&'):'')}var q=[];if(d)q.push('d=1');if(e)q.push('e=1');return location.origin+'/'+rs+'.bmp'+(q.length?'?'+q.join('&'):'')}function upd(){var i;for(i=0;i<3;i++)g('r'+i).style.background=(fmt!=2&&r==i)?'#383':'';for(i=0;i<3;i++)g('f'+i).style.background=fmt==i?'#383':'';var db=g('db'),eb=g('eb'),dok=fmt!=2,eok=fmt==0;db.disabled=!dok;db.style.opacity=dok?1:.4;db.style.background=(dok&&d)?'#383':'#555';db.textContent='Denoise '+(d?'ON':'OFF');eb.disabled=!eok;eb.style.opacity=eok?1:.4;eb.style.background=(eok&&e)?'#383':'#555';eb.textContent='RGB565 '+(e?'ON':'OFF');var tb=g('tb'),tok=fmt==1;tb.disabled=!tok;tb.style.opacity=tok?1:.4;tb.style.background=(tok&&t)?'#383':'#555';tb.textContent='2-core '+(t?'ON':'OFF');g('u').value=url()}function C(){var u=g('u');u.focus();u.select();u.setSelectionRange(0,99999);try{document.execCommand('copy')}catch(z){}}function S(x){r=x;if(fmt==2)fmt=0;n=0;t0=0;upd()}function F(x){fmt=x;n=0;t0=0;upd()}function D(){if(fmt!=2){d=d?0:1;n=0;t0=0;upd()}}function E(){if(fmt==0){e=e?0:1;n=0;t0=0;upd()}}function T(){if(fmt==1){t=t?0:1;n=0;t0=0;upd()}}function L(){var im=new Image();im.onload=function(){var c=g('c');c.width=im.naturalWidth;c.height=im.naturalHeight;c.getContext('2d').drawImage(im,0,0);n++;var s=(fmt==2?'JPEGcam':['QQVGA','QVGA','VGA'][r]+(fmt==1?' JPEGsw':' BMP')+(d?' +dn':'')+(e&&fmt==0?' +565':'')+(t&&fmt==1?' x2':''))+'  frame '+n;if(n<2){t0=Date.now()}else{s+='  ('+((n-1)*1000/(Date.now()-t0)).toFixed(2)+' fps)'}g('s').textContent=s;setTimeout(L,40)};im.onerror=function(){setTimeout(L,800)};var u=url();im.src=u+(u.indexOf('?')<0?'?':'&')+'t='+Date.now()}upd();L()</script></body></html>";
+// Resolution / format / toggle buttons + live <canvas> reload. Each control rebuilds the
+// URL (path = res+format, query = ?denoise/?rgb565/?dual) and the loader re-requests it
+// cache-busted on each frame, so the stream just runs as fast as frames serve.
+const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title><meta name=viewport content=\"width=device-width,initial-scale=1\"></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><button id=\"r0\" onclick=\"S(0)\">QQVGA</button> <button id=\"r1\" onclick=\"S(1)\">QVGA</button> <button id=\"r2\" onclick=\"S(2)\">VGA</button></div><div style=\"margin-top:4px\"><button id=\"f0\" onclick=\"F(0)\">BMP</button> <button id=\"f1\" onclick=\"F(1)\">JPEG sw</button> <button id=\"f2\" onclick=\"F(2)\">JPEG cam</button> &nbsp; <button id=\"db\" onclick=\"D()\">Denoise OFF</button> <button id=\"eb\" onclick=\"E()\">RGB565 OFF</button> <button id=\"tb\" onclick=\"T()\">2-core OFF</button></div><div style=\"margin-top:8px\"><canvas id=\"c\" style=\"width:640px;max-width:98vw;image-rendering:pixelated\"></canvas></div><p id=\"s\">connecting...</p><div style=\"margin:6px\"><input id=\"u\" readonly style=\"width:90%;max-width:600px;background:#222;color:#9f9;border:1px solid #444;padding:4px;font-family:monospace\"> <button onclick=\"C()\">Copy URL</button></div><p>BMP=lossless RGB565 (RGB565 toggle: ESP32 expands, 33% less UART). JPEG sw=on-chip software encode (clean, ~10-20x smaller, any res). JPEG cam=OV2640 hardware codec (often colour-shifts on this board). Denoise=median+destripe. 2-core=both K210 cores encode halves in parallel (one RST marker, ~1.8x faster, JPEG sw only).</p><script>var r=1,fmt=0,d=0,e=0,t=0,n=0,t0=0;function g(i){return document.getElementById(i)}function url(){if(fmt==2)return location.origin+'/cam.jpg';var rs=['qqvga','qvga','vga'][r];if(fmt==1){var qj=[];if(d)qj.push('denoise=1');if(t)qj.push('dual=1');return location.origin+'/'+rs+'.jpg'+(qj.length?'?'+qj.join('&'):'')}var q=[];if(d)q.push('denoise=1');if(e)q.push('rgb565=1');return location.origin+'/'+rs+'.bmp'+(q.length?'?'+q.join('&'):'')}function upd(){var i;for(i=0;i<3;i++)g('r'+i).style.background=(fmt!=2&&r==i)?'#383':'';for(i=0;i<3;i++)g('f'+i).style.background=fmt==i?'#383':'';var db=g('db'),eb=g('eb'),dok=fmt!=2,eok=fmt==0;db.disabled=!dok;db.style.opacity=dok?1:.4;db.style.background=(dok&&d)?'#383':'#555';db.textContent='Denoise '+(d?'ON':'OFF');eb.disabled=!eok;eb.style.opacity=eok?1:.4;eb.style.background=(eok&&e)?'#383':'#555';eb.textContent='RGB565 '+(e?'ON':'OFF');var tb=g('tb'),tok=fmt==1;tb.disabled=!tok;tb.style.opacity=tok?1:.4;tb.style.background=(tok&&t)?'#383':'#555';tb.textContent='2-core '+(t?'ON':'OFF');g('u').value=url()}function C(){var u=g('u');u.focus();u.select();u.setSelectionRange(0,99999);try{document.execCommand('copy')}catch(z){}}function S(x){r=x;if(fmt==2)fmt=0;n=0;t0=0;upd()}function F(x){fmt=x;n=0;t0=0;upd()}function D(){if(fmt!=2){d=d?0:1;n=0;t0=0;upd()}}function E(){if(fmt==0){e=e?0:1;n=0;t0=0;upd()}}function T(){if(fmt==1){t=t?0:1;n=0;t0=0;upd()}}function L(){var im=new Image();im.onload=function(){var c=g('c');c.width=im.naturalWidth;c.height=im.naturalHeight;c.getContext('2d').drawImage(im,0,0);n++;var s=(fmt==2?'JPEGcam':['QQVGA','QVGA','VGA'][r]+(fmt==1?' JPEGsw':' BMP')+(d?' +dn':'')+(e&&fmt==0?' +565':'')+(t&&fmt==1?' x2':''))+'  frame '+n;if(n<2){t0=Date.now()}else{s+='  ('+((n-1)*1000/(Date.now()-t0)).toFixed(2)+' fps)'}g('s').textContent=s;setTimeout(L,40)};im.onerror=function(){setTimeout(L,800)};var u=url();im.src=u+(u.indexOf('?')<0?'?':'&')+'t='+Date.now()}upd();L()</script></body></html>";
 
 fn sysctl() -> *const pac::sysctl::RegisterBlock {
     pac::SYSCTL::ptr()
@@ -313,7 +313,7 @@ fn destripe(w: usize, h: usize) {
     }
 }
 
-/// Parse a single decimal digit following `key` in the request (e.g. b"?r=" -> 2),
+/// Parse a single decimal digit following `key` in the request (e.g. b"res=" -> 2),
 /// clamped to `maxv`; `default` if not found.
 fn parse_digit(req: &[u8], key: &[u8], default: usize, maxv: usize) -> usize {
     let kl = key.len();
@@ -341,13 +341,10 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     needle.len() <= hay.len() && hay.windows(needle.len()).any(|w| w == needle)
 }
 
-/// A 0/1 query flag that may appear as the first (`?k=`) or a later (`&k=`) param.
-fn flag(req: &[u8], q: &[u8], a: &[u8]) -> usize {
-    if parse_digit(req, q, 0, 1) == 1 || parse_digit(req, a, 0, 1) == 1 {
-        1
-    } else {
-        0
-    }
+/// A 0/1 query flag, e.g. `flag(req, b"denoise=")` matches `?denoise=1` or `&denoise=1`
+/// (the `key=` substring is searched anywhere, so first-vs-later in the query is moot).
+fn flag(req: &[u8], key: &[u8]) -> usize {
+    parse_digit(req, key, 0, 1)
 }
 
 const CHUNK: usize = 1440; // <= ESP32 MAXPL (1600)
@@ -797,7 +794,7 @@ fn main() -> ! {
     dvp.set_ai_addr(None);
     dvp.set_auto(false);
     let mut cur_res = 1usize; // default QVGA (matches the page's default r=1)
-    let mut cur_jpeg = false; // JPEG mode (option-2 spike), toggled by &j=1
+    let mut cur_jpeg = false; // camera HW JPEG configured (path /cam.jpg or ?hwjpeg=1)
     // Capture pipeline: -1 = no capture in flight; else the CAP index (0 or 3) whose DMA
     // is filling in the background, armed with `pipe_res`. The DVP capture (~540 ms at VGA)
     // dwarfs encode+send (~250 ms), so we overlap them: while encoding+sending frame N we
@@ -900,12 +897,15 @@ fn main() -> ! {
             }
             uart_wifi::sleep_ms(12);
         }
-        // Mode comes from the PATH: /cam.jpg (JPEG), /{qqvga,qvga,vga}.bmp (BMP);
-        // toggles stay as query flags (?d=1 denoise, ?e=1 RGB565-direct). Old query
-        // forms (?j=1, ?r=N) still work as a fallback.
+        // Mode comes from the PATH: /cam.jpg (camera HW JPEG), /{res}.jpg (software JPEG),
+        // /{qqvga,qvga,vga}.bmp (BMP). Options are readable query flags:
+        //   ?denoise=1  median+destripe (BMP/JPEG)
+        //   ?rgb565=1   send RGB565, expand on the ESP32 (BMP only)
+        //   ?dual=1     two-core parallel encode (software JPEG only)
+        // Query fallbacks for the path: ?res=0|1|2 (resolution), ?hwjpeg=1 (camera HW JPEG).
         let rs = &req[..rl];
         // /cam.jpg = camera HARDWARE JPEG; /{res}.jpg = SOFTWARE JPEG; /{res}.bmp = BMP.
-        let is_camjpg = contains(rs, b"cam.jpg") || flag(rs, b"?j=", b"&j=") == 1;
+        let is_camjpg = contains(rs, b"cam.jpg") || flag(rs, b"hwjpeg=") == 1;
         let is_swjpg = !is_camjpg && contains(rs, b".jpg");
         let is_bmp = contains(rs, b".bmp");
 
@@ -942,7 +942,7 @@ fn main() -> ! {
                 cur_jpeg = false;
             }
             // resolution from the path (qqvga before qvga before vga -- substrings!),
-            // else the old ?r= query, else keep current.
+            // else the ?res= query, else keep current.
             let r = if contains(rs, b"qqvga") {
                 0
             } else if contains(rs, b"qvga") {
@@ -950,11 +950,11 @@ fn main() -> ! {
             } else if contains(rs, b"vga") {
                 2
             } else {
-                parse_digit(rs, b"?r=", cur_res, 2)
+                parse_digit(rs, b"res=", cur_res, 2) // else the ?res= fallback, else keep current
             };
-            let d = flag(rs, b"?d=", b"&d=");
-            let e = flag(rs, b"?e=", b"&e="); // RGB565-direct (BMP only)
-            let two = flag(rs, b"?2=", b"&2="); // dual-core encode (JPEG sw only)
+            let d = flag(rs, b"denoise=");
+            let e = flag(rs, b"rgb565="); // RGB565-direct (BMP only)
+            let two = flag(rs, b"dual="); // dual-core encode (JPEG sw only)
             if r != cur_res {
                 if pipe_arm >= 0 {
                     dvp.capture_wait(); // a re-config does its own captures; drain ours first
