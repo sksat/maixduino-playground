@@ -166,7 +166,27 @@ impl Dvp {
 
     /// Capture one full frame (blocking).
     pub fn get_image(&self) {
-        self.capture_arm();
+        // Robust double frame-start sync (wait, clear the possibly-stale start, wait for a
+        // fresh boundary) then enable + wait. Used for one-off synchronous captures.
+        while !self.dvp.sts.read().frame_start().bit() {}
+        self.dvp
+            .sts
+            .write(|w| w.frame_start().set_bit().frame_start_we().set_bit());
+        while !self.dvp.sts.read().frame_start().bit() {}
+        self.dvp.sts.write(|w| {
+            w.frame_finish()
+                .set_bit()
+                .frame_finish_we()
+                .set_bit()
+                .frame_start()
+                .set_bit()
+                .frame_start_we()
+                .set_bit()
+                .dvp_en()
+                .set_bit()
+                .dvp_en_we()
+                .set_bit()
+        });
         self.capture_wait();
     }
 
@@ -174,8 +194,12 @@ impl Dvp {
     /// starts filling the display buffer. Blocks only for the frame-start sync; the long
     /// pixel transfer then runs in the background (poll/finish it with `capture_wait`),
     /// so the CPU is free to encode+send the previous frame meanwhile.
+    ///
+    /// Single-sync (vs `get_image`'s double): clear any stale `frame_start` FIRST, then one
+    /// wait lands on a fresh boundary — saving up to a full frame period (~half the arm
+    /// time, which is the pipeline's exposed cost). Enabling exactly at the cleared-then-
+    /// asserted boundary still catches the whole frame.
     pub fn capture_arm(&self) {
-        while !self.dvp.sts.read().frame_start().bit() {}
         self.dvp
             .sts
             .write(|w| w.frame_start().set_bit().frame_start_we().set_bit());

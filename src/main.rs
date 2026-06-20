@@ -78,6 +78,7 @@ const S_OUTCAP: usize = 8; // output capacity (bytes)
 const S_LEN: usize = 9; // hart1 -> hart0: bytes written
 const S_HEARTBEAT: usize = 10; // hart1 liveness counter
 const S_OVF: usize = 11; // hart1 -> hart0: output overflowed
+const S_SINK: usize = 12; // scratch sink for flush_l1's read (kept off S_HEARTBEAT)
 
 #[inline]
 fn shared_base() -> *mut u32 {
@@ -694,7 +695,7 @@ fn flush_l1() {
         acc = acc.wrapping_add(unsafe { core::ptr::read_volatile(p.add(i)) });
         i += 1;
     }
-    sst(S_HEARTBEAT, acc | 1); // sink the read (and prove liveness path is exercised)
+    sst(S_SINK, acc | 1); // sink the read so the compiler can't drop the loop
 }
 
 /// Hart 1 entry. Must NOT touch any peripheral hart 0 owns (it never calls
@@ -702,13 +703,26 @@ fn flush_l1() {
 /// job entropy-codes an MCU-row range of the source frame into a caller-given buffer.
 /// All source reads and output writes go through uncached pointers hart 0 hands over.
 fn core1_main() -> ! {
+    // Clear any stale job state left in SRAM by a previous boot before the gate, so a
+    // warm-reboot can't fool us into running a job with garbage params. (SRAM persists
+    // across reset, so READY may still hold the magic from last run — harmless: we just
+    // re-enter the idle loop and wait for hart 0 to post a fresh job.)
+    sst(S_STATE, 0);
     while sld(S_READY) != READY_MAGIC {
         core::hint::spin_loop();
     }
-    sst(S_HEARTBEAT, 1); // tell hart 0 we're past the gate
+    let mut tick = 0u32;
     loop {
-        while sld(S_STATE) != 1 {
+        // Periodically assert liveness so hart 0's readiness poll sees us even if its
+        // boot-time cached zero of SHARED flushes over an earlier write. Throttled so the
+        // idle uncached writes don't contend with hart 0 on the bus.
+        tick = tick.wrapping_add(1);
+        if tick & 0x3FFF == 0 {
+            sst(S_HEARTBEAT, 1);
+        }
+        if sld(S_STATE) != 1 {
             core::hint::spin_loop();
+            continue;
         }
         fence();
         let fb = sld(S_FB) as usize as *const u32;
