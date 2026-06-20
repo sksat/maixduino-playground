@@ -47,9 +47,12 @@ const MAXH: usize = 480;
 struct Frame {
     px: [u32; MAXW * MAXH / 2],
 }
-// Three capture buffers: denoise OFF uses CAP[0]; denoise ON captures 3 frames and
-// medians them into CAP[0]. 3 * 614 KB (VGA) = 1.84 MB, fits the 6 MB SRAM.
-static mut CAP: [Frame; 3] = [
+// Buffers: CAP[0]/CAP[3] are a capture ping-pong (the pipeline fills one while encoding
+// the other); CAP[1] = JPEG output, CAP[2] = hart 1's segment / single-core cached copy.
+// Denoise (synchronous fallback) captures into CAP[0..3] and medians into CAP[0].
+// 4 * 614 KB (VGA) = 2.46 MB, plus two 512 KB stacks, fits the 6 MB SRAM.
+static mut CAP: [Frame; 4] = [
+    Frame { px: [0; MAXW * MAXH / 2] },
     Frame { px: [0; MAXW * MAXH / 2] },
     Frame { px: [0; MAXW * MAXH / 2] },
     Frame { px: [0; MAXW * MAXH / 2] },
@@ -193,10 +196,16 @@ fn cap_uncached(i: usize) -> *mut u32 {
     (cap_cached(i) as usize - UNCACHED_OFFSET) as *mut u32
 }
 
-/// Capture one frame into buffer `i`.
+/// Capture one frame into buffer `i` (blocking).
 fn capture(dvp: &Dvp, i: usize) {
     dvp.set_display_addr(Some(cap_cached(i)));
     dvp.get_image();
+}
+
+/// Start a capture into buffer `i` (DMA runs in the background; finish with `capture_wait`).
+fn capture_arm(dvp: &Dvp, i: usize) {
+    dvp.set_display_addr(Some(cap_cached(i)));
+    dvp.capture_arm();
 }
 
 /// Apply the OV2640 + DVP config for resolution index `r` and return (w, h). Re-runs
@@ -500,7 +509,7 @@ fn serve_bmp(w: usize, h: usize, expand565: bool, reply: &mut [u8]) -> bool {
 /// segments are joined by one RST0 restart marker (DRI in the header). Returns the JPEG
 /// length in CAP[1], or None on overflow. Halving the dominant cost (entropy + DCT) is
 /// the win; the restart marker keeps the output a standard JPEG.
-fn encode_dual(w: usize, h: usize, out: &mut [u8]) -> Option<usize> {
+fn encode_dual(w: usize, h: usize, src: usize, out: &mut [u8]) -> Option<usize> {
     let mcx = (w + 15) / 16;
     let mcy = (h + 15) / 16;
     let mcy_top = (mcy + 1) / 2; // hart 0 does [0, mcy_top); hart 1 does [mcy_top, mcy)
@@ -509,7 +518,7 @@ fn encode_dual(w: usize, h: usize, out: &mut [u8]) -> Option<usize> {
     // Flush so no stale dirty line of hart 0's (incl. a prior single-core cached copy in
     // CAP[2]) can flush over hart 1's uncached output mid-job, then post the job.
     flush_l1();
-    sst(S_FB, cap_uncached(0) as usize as u32);
+    sst(S_FB, cap_uncached(src) as usize as u32);
     sst(S_W, w as u32);
     sst(S_H, h as u32);
     sst(S_MCY0, mcy_top as u32);
@@ -524,7 +533,7 @@ fn encode_dual(w: usize, h: usize, out: &mut [u8]) -> Option<usize> {
 
     // hart 0: headers (with DRI) + top segment into CAP[1].
     let start = jpeg::write_headers(out, w, h, ri);
-    let len0 = jpeg::encode_segment(cap_uncached(0) as *const u32, w, h, 0, mcy_top, &mut out[start..])?;
+    let len0 = jpeg::encode_segment(cap_uncached(src) as *const u32, w, h, 0, mcy_top, &mut out[start..])?;
     let mut p = start + len0;
     out[p] = 0xFF;
     out[p + 1] = 0xD0; // RST0 between the two segments
@@ -556,26 +565,26 @@ fn encode_dual(w: usize, h: usize, out: &mut [u8]) -> Option<usize> {
 
 /// Encode CAP[0] (w x h RGB565) to JPEG into CAP[1] (free, 614 KB) and serve it as
 /// image/jpeg. `dual` runs the two-core split encoder. Returns (ok, jpeg_len, enc_ms).
-fn serve_swjpeg(w: usize, h: usize, dual: bool, reply: &mut [u8]) -> (bool, usize, u64) {
+fn serve_swjpeg(w: usize, h: usize, src: usize, dual: bool, reply: &mut [u8]) -> (bool, usize, u64) {
     let out = unsafe {
         core::slice::from_raw_parts_mut(cap_uncached(1) as *mut u8, MAXW * MAXH / 2 * 4)
     };
     let t_enc = mtime_ms();
     let len = if dual {
-        match encode_dual(w, h, out) {
+        match encode_dual(w, h, src, out) {
             Some(n) => n,
             None => return (false, 0, 0),
         }
     } else {
-        // Copy the frame uncached(0) -> cached(2) once. The encoder reads each pixel ~2x
+        // Copy the frame uncached(src) -> cached(2) once. The encoder reads each pixel ~2x
         // (luma + chroma); reading from the cached alias makes those hit L1 instead of
         // paying the uncached-AXI latency on every access. One sequential copy (W*H/2 word
         // reads) is far cheaper than 2*W*H scattered uncached reads.
         let words = w * h / 2;
         unsafe {
-            let src = core::slice::from_raw_parts(cap_uncached(0) as *const u32, words);
+            let s = core::slice::from_raw_parts(cap_uncached(src) as *const u32, words);
             let dst = core::slice::from_raw_parts_mut(cap_cached(2) as *mut u32, words);
-            dst.copy_from_slice(src);
+            dst.copy_from_slice(s);
         }
         match jpeg::encode(cap_cached(2) as *const u32, w, h, out) {
             Some(n) => n,
@@ -775,6 +784,12 @@ fn main() -> ! {
     dvp.set_auto(false);
     let mut cur_res = 1usize; // default QVGA (matches the page's default r=1)
     let mut cur_jpeg = false; // JPEG mode (option-2 spike), toggled by &j=1
+    // Capture pipeline: -1 = no capture in flight; else the CAP index (0 or 3) whose DMA
+    // is filling in the background, armed with `pipe_res`. The DVP capture (~540 ms at VGA)
+    // dwarfs encode+send (~250 ms), so we overlap them: while encoding+sending frame N we
+    // let the DVP fill the other ping-pong buffer with N+1.
+    let mut pipe_arm: i32 = -1;
+    let mut pipe_res = cur_res;
     let (mut w, mut h) = configure_res(&dvp, cur_res);
     puts(b"camera ready\n");
 
@@ -882,6 +897,10 @@ fn main() -> ! {
 
         if is_camjpg {
             // ---- camera HARDWARE JPEG (/cam.jpg) ----
+            if pipe_arm >= 0 {
+                dvp.capture_wait(); // drain any in-flight RGB capture before reconfiguring
+                pipe_arm = -1;
+            }
             if !cur_jpeg {
                 configure_jpeg(&dvp);
                 cur_jpeg = true;
@@ -899,6 +918,10 @@ fn main() -> ! {
             puts(b"ms\n");
         } else if is_swjpg || is_bmp {
             if cur_jpeg {
+                if pipe_arm >= 0 {
+                    dvp.capture_wait();
+                    pipe_arm = -1;
+                }
                 let (nw, nh) = configure_res(&dvp, cur_res); // back to RGB output
                 w = nw;
                 h = nh;
@@ -919,24 +942,66 @@ fn main() -> ! {
             let e = flag(rs, b"?e=", b"&e="); // RGB565-direct (BMP only)
             let two = flag(rs, b"?2=", b"&2="); // dual-core encode (JPEG sw only)
             if r != cur_res {
+                if pipe_arm >= 0 {
+                    dvp.capture_wait(); // a re-config does its own captures; drain ours first
+                    pipe_arm = -1;
+                }
                 let (nw, nh) = configure_res(&dvp, r); // ~185 SCCB writes + warm-up
                 w = nw;
                 h = nh;
                 cur_res = r;
             }
+            // Pick the source buffer for this frame. The JPEG-sw + denoise-off path runs
+            // the capture pipeline (overlap next capture with this encode+send); every
+            // other path drains the pipeline and captures synchronously.
+            let src;
+            let tc = mtime_ms();
             if d == 1 {
+                if pipe_arm >= 0 {
+                    dvp.capture_wait();
+                    pipe_arm = -1;
+                }
                 capture(&dvp, 0);
                 capture(&dvp, 1);
                 capture(&dvp, 2);
                 denoise_median(w, h);
                 destripe(w, h);
+                src = 0;
+            } else if is_swjpg {
+                // pipeline: the buffer armed last iteration holds this frame.
+                if pipe_arm >= 0 && pipe_res == cur_res {
+                    dvp.capture_wait();
+                    src = pipe_arm as usize;
+                } else {
+                    if pipe_arm >= 0 {
+                        dvp.capture_wait();
+                    }
+                    capture(&dvp, 0);
+                    src = 0;
+                }
+                // arm the next capture into the other ping-pong buffer so its DMA runs
+                // during this frame's encode+send.
+                let nxt = if src == 0 { 3 } else { 0 };
+                capture_arm(&dvp, nxt);
+                pipe_arm = nxt as i32;
+                pipe_res = cur_res;
             } else {
+                // BMP: synchronous, no pipeline.
+                if pipe_arm >= 0 {
+                    dvp.capture_wait();
+                    pipe_arm = -1;
+                }
                 capture(&dvp, 0);
+                src = 0;
             }
+            let cap_ms = mtime_ms().wrapping_sub(tc);
+            puts(b"[cap ");
+            put_dec(cap_ms as u32);
+            puts(b"ms] ");
             frame_no += 1;
             let start = mtime_ms();
             if is_swjpg {
-                let (ok, len, enc_ms) = serve_swjpeg(w, h, two == 1, &mut reply); // CAP[1]=output
+                let (ok, len, enc_ms) = serve_swjpeg(w, h, src, two == 1, &mut reply); // CAP[1]=output
                 let ms = mtime_ms().wrapping_sub(start);
                 puts(b"frame ");
                 put_dec(frame_no);

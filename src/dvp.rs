@@ -166,6 +166,15 @@ impl Dvp {
 
     /// Capture one full frame (blocking).
     pub fn get_image(&self) {
+        self.capture_arm();
+        self.capture_wait();
+    }
+
+    /// First half of a capture: sync to a frame boundary and enable the DVP so its DMA
+    /// starts filling the display buffer. Blocks only for the frame-start sync; the long
+    /// pixel transfer then runs in the background (poll/finish it with `capture_wait`),
+    /// so the CPU is free to encode+send the previous frame meanwhile.
+    pub fn capture_arm(&self) {
         while !self.dvp.sts.read().frame_start().bit() {}
         self.dvp
             .sts
@@ -185,6 +194,10 @@ impl Dvp {
                 .dvp_en_we()
                 .set_bit()
         });
+    }
+
+    /// Second half: wait for the in-flight frame's DMA to complete.
+    pub fn capture_wait(&self) {
         while !self.dvp.sts.read().frame_finish().bit() {}
     }
 }
