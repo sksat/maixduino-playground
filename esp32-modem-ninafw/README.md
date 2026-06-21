@@ -77,3 +77,33 @@ make -j"$(nproc)"
 Then `../esp32-firmware/hold_gpio0_high.py` while the K210 boots (the flash can leave
 GPIO0 latched low = download mode). `nina-modem-merged.bin.gz` is the prebuilt image
 so you can flash without rebuilding the whole idf tree.
+
+## Reproducing the build (confirmed base: nina-fw 1.4.8)
+
+The original build tree was cleaned up; to rebuild, the confirmed-good base is
+**arduino/nina-fw tag `1.4.8`** (the last of the idf-3.3.1 line — tags 1.3.0–1.4.8 use
+idf v3.3.x; 1.5.0+ moved to idf 4.4 which does NOT associate on this module). App
+partition is `0x30000` (matches the prebuilt). Integration:
+
+```sh
+git clone https://github.com/arduino/nina-fw && cd nina-fw && git checkout 1.4.8
+cp <repo>/esp32-modem-ninafw/sketch.ino.cpp main/sketch.ino.cpp
+mv main/CommandHandler.cpp main/CommandHandler.cpp.disabled   # main/ auto-globs *.cpp
+# 1.4.8's WiFiClient::write is a single MSG_PEEK send (the blocking-write.patch's MSG_DONTWAIT
+# base does NOT apply) -> replace write() with a send-all loop that blocks on EWOULDBLOCK
+# via lwip_select (same logic as the patch). Required for frames > the lwip send buffer.
+export IDF_PATH=~/esp/esp-idf-v3.3
+export PATH="$HOME/esp/xtensa-esp32-elf-520/bin:$HOME/esp/idf38/bin:$HOME/.local/bin:$PATH"
+make -j$(nproc) && python combine.py /tmp/nina.bin
+<repo>/esp32-firmware/flash-esp32.sh /tmp/nina.bin 0x0
+```
+
+## Throughput tuning — negative result
+
+The stream/serve tops out at **~100 KB/s** (VGA ~2.5 fps, QVGA ~5.7 fps). Hypothesis: the
+idf-3.3 lwip TCP send buffer/window (`CONFIG_TCP_SND_BUF_DEFAULT`=`TCP_WND_DEFAULT`=5744=4·MSS)
+caps it. Tested by rebuilding with **TCP_SND_BUF/WND=28720 (20·MSS) + `TCP_NODELAY` on accept**.
+**It did not help — it made throughput *worse* and unstable** (VGA 20–95 KB/s, QVGA single
+fetches stalled ~5 s). So the bottleneck is the **ESP32's real WiFi TX rate** (PHY/signal/idf3.3
+stack), not the TCP window; a bigger buffer just bufferbloats. Rolled back to the prebuilt. The
+fps ceiling on this board is WiFi TX and is not breakable from the K210 side or via TCP config.

@@ -107,6 +107,15 @@
   流用。**ただし速くはならない**: 実測 VGA 2.5fps・QVGA 5.7fps で、どちらも **~100KB/s の WiFi(ESP32) スループット律速**
   （polling も同じ天井に当たる＝ボトルネックは per-request オーバーヘッドではなく WiFi だった）。価値は「滑らかな連続 push＋
   標準形式＋K210 の per-request 処理が消える」こと。モード切替時はブラウザが `<img>` の src を貼り替えて再接続。
+  **WiFi スループットを上げようとして失敗した記録（negative result）**: 天井の ~100KB/s は idf-v3.3 lwip の TCP 送信バッファ
+  /ウィンドウ（`CONFIG_TCP_SND_BUF_DEFAULT`=`TCP_WND_DEFAULT`=5744=4*MSS）が原因と仮説。検証のため nina-fw を**再構築して
+  再ビルド**した（消えていたビルドツリーを nina-fw **1.4.8**＝idf-3.3 系最終＋idf-v3.3/gcc-5.2.0 で再現、`WiFiClient::write` を
+  ブロッキング送信に差し替え＝1.4.8 は MSG_PEEK 版でパッチが当たらない、`WiFiServer::available` に `TCP_NODELAY` 注入、
+  TCP_SND_BUF/WND を 5744→28720 に。combine.py で merged 化→CH552 リセットで ESP32 フラッシュ）。**結果は逆効果**: スループット
+  は改善せず、むしろ不安定化（VGA 20-95KB/s とばらつき、QVGA single fetch が ~5s ストール）。つまり**ボトルネックは TCP
+  ウィンドウではなく ESP32 の実 WiFi TX レート**（PHY/信号/idf3.3 スタック）で、バッファを増やしても破れずバッファブロート化
+  するだけ。**既知良品の prebuilt nina-fw にロールバック**（QVGA stream 106KB/s に復帰）。教訓: この基板の fps 天井は WiFi TX で、
+  K210 側でも TCP 設定でも破れない。再構築したビルドツリーは `~/esp/nina-fw`（1.4.8）に残置。
   **効いた一手＝WiFi を SPI0 から UART に逃がした**こと。旧版の遅さは「カメラ(DVP)と WiFi(nina) が両方 SPI0 を
   使い、撮影が ESP32 のネットを壊す→撮影ごとに EN リセット＋再接続(~5s)」が原因だった。**ESP32 を UART
   modem 化**すれば WiFi はカメラと無関係な IO6/IO7 を通るので、撮影がネットを壊さない＝復旧ダンスが丸ごと消え、
