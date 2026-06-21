@@ -176,7 +176,7 @@ fn le32(out: &mut [u8], v: u32) {
 // Resolution / format / toggle buttons + live <canvas> reload. Each control rebuilds the
 // URL (path = res+format, query = ?denoise/?rgb565/?dual) and the loader re-requests it
 // cache-busted on each frame, so the stream just runs as fast as frames serve.
-const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title><meta name=viewport content=\"width=device-width,initial-scale=1\"></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><button id=\"r0\" onclick=\"S(0)\">QQVGA</button> <button id=\"r1\" onclick=\"S(1)\">QVGA</button> <button id=\"r2\" onclick=\"S(2)\">VGA</button></div><div style=\"margin-top:4px\"><button id=\"f0\" onclick=\"F(0)\">BMP</button> <button id=\"f1\" onclick=\"F(1)\">JPEG sw</button> <button id=\"f2\" onclick=\"F(2)\">JPEG cam</button> &nbsp; <button id=\"db\" onclick=\"D()\">Denoise OFF</button> <button id=\"eb\" onclick=\"E()\">RGB565 OFF</button> <button id=\"tb\" onclick=\"T()\">2-core OFF</button></div><div style=\"margin-top:8px\"><canvas id=\"c\" style=\"width:640px;max-width:98vw;image-rendering:pixelated\"></canvas></div><p id=\"s\">connecting...</p><div style=\"margin:6px\"><input id=\"u\" readonly style=\"width:90%;max-width:600px;background:#222;color:#9f9;border:1px solid #444;padding:4px;font-family:monospace\"> <button onclick=\"C()\">Copy URL</button></div><p>BMP=lossless RGB565 (RGB565 toggle: ESP32 expands, 33% less UART). JPEG sw=on-chip software encode (clean, ~10-20x smaller, any res). JPEG cam=OV2640 hardware codec (often colour-shifts on this board). Denoise=median+destripe. 2-core=both K210 cores encode halves in parallel (one RST marker, ~1.8x faster, JPEG sw only).</p><script>var r=1,fmt=0,d=0,e=0,t=0,n=0,t0=0;function g(i){return document.getElementById(i)}function url(){if(fmt==2)return location.origin+'/cam.jpg';var rs=['qqvga','qvga','vga'][r];if(fmt==1){var qj=[];if(d)qj.push('denoise=1');if(t)qj.push('dual=1');return location.origin+'/'+rs+'.jpg'+(qj.length?'?'+qj.join('&'):'')}var q=[];if(d)q.push('denoise=1');if(e)q.push('rgb565=1');return location.origin+'/'+rs+'.bmp'+(q.length?'?'+q.join('&'):'')}function upd(){var i;for(i=0;i<3;i++)g('r'+i).style.background=(fmt!=2&&r==i)?'#383':'';for(i=0;i<3;i++)g('f'+i).style.background=fmt==i?'#383':'';var db=g('db'),eb=g('eb'),dok=fmt!=2,eok=fmt==0;db.disabled=!dok;db.style.opacity=dok?1:.4;db.style.background=(dok&&d)?'#383':'#555';db.textContent='Denoise '+(d?'ON':'OFF');eb.disabled=!eok;eb.style.opacity=eok?1:.4;eb.style.background=(eok&&e)?'#383':'#555';eb.textContent='RGB565 '+(e?'ON':'OFF');var tb=g('tb'),tok=fmt==1;tb.disabled=!tok;tb.style.opacity=tok?1:.4;tb.style.background=(tok&&t)?'#383':'#555';tb.textContent='2-core '+(t?'ON':'OFF');g('u').value=url()}function C(){var u=g('u');u.focus();u.select();u.setSelectionRange(0,99999);try{document.execCommand('copy')}catch(z){}}function S(x){r=x;if(fmt==2)fmt=0;n=0;t0=0;upd()}function F(x){fmt=x;n=0;t0=0;upd()}function D(){if(fmt!=2){d=d?0:1;n=0;t0=0;upd()}}function E(){if(fmt==0){e=e?0:1;n=0;t0=0;upd()}}function T(){if(fmt==1){t=t?0:1;n=0;t0=0;upd()}}function L(){var im=new Image();im.onload=function(){var c=g('c');c.width=im.naturalWidth;c.height=im.naturalHeight;c.getContext('2d').drawImage(im,0,0);n++;var s=(fmt==2?'JPEGcam':['QQVGA','QVGA','VGA'][r]+(fmt==1?' JPEGsw':' BMP')+(d?' +dn':'')+(e&&fmt==0?' +565':'')+(t&&fmt==1?' x2':''))+'  frame '+n;if(n<2){t0=Date.now()}else{s+='  ('+((n-1)*1000/(Date.now()-t0)).toFixed(2)+' fps)'}g('s').textContent=s;setTimeout(L,40)};im.onerror=function(){setTimeout(L,800)};var u=url();im.src=u+(u.indexOf('?')<0?'?':'&')+'t='+Date.now()}upd();L()</script></body></html>";
+const HTML: &[u8] = b"<!doctype html><html><head><title>K210 cam</title><meta name=viewport content=\"width=device-width,initial-scale=1\"></head><body style=\"background:#111;color:#eee;text-align:center;font-family:sans-serif\"><h2>K210 bare-metal Rust camera (UART WiFi)</h2><div><button id=\"r0\" onclick=\"S(0)\">QQVGA</button> <button id=\"r1\" onclick=\"S(1)\">QVGA</button> <button id=\"r2\" onclick=\"S(2)\">VGA</button></div><div style=\"margin-top:4px\"><button id=\"f0\" onclick=\"F(0)\">BMP</button> <button id=\"f1\" onclick=\"F(1)\">JPEG sw</button> <button id=\"f2\" onclick=\"F(2)\">JPEG cam</button> <button id=\"f3\" onclick=\"F(3)\">MJPEG</button> &nbsp; <button id=\"db\" onclick=\"D()\">Denoise OFF</button> <button id=\"eb\" onclick=\"E()\">RGB565 OFF</button> <button id=\"tb\" onclick=\"T()\">2-core OFF</button></div><div style=\"margin-top:8px\"><canvas id=\"c\" style=\"width:640px;max-width:98vw;image-rendering:pixelated\"></canvas><img id=\"mj\" style=\"width:640px;max-width:98vw;image-rendering:pixelated;display:none\"></div><p id=\"s\">connecting...</p><div style=\"margin:6px\"><input id=\"u\" readonly style=\"width:90%;max-width:600px;background:#222;color:#9f9;border:1px solid #444;padding:4px;font-family:monospace\"> <button onclick=\"C()\">Copy URL</button></div><p>BMP=lossless RGB565 (RGB565 toggle: ESP32 expands, 33% less UART). JPEG sw=on-chip software encode (clean, ~10-20x smaller, any res). JPEG cam=OV2640 hardware codec (often colour-shifts on this board). Denoise=median+destripe. 2-core=both K210 cores encode halves in parallel (one RST marker, ~1.8x faster, JPEG sw only). MJPEG=held-open multipart software-JPEG stream (no per-request overhead; res/2-core/Denoise apply).</p><script>var r=1,fmt=0,d=0,e=0,t=0,n=0,t0=0,mjsrc='';function g(i){return document.getElementById(i)}function url(){if(fmt==2)return location.origin+'/cam.jpg';if(fmt==3){var qm=[];if(d)qm.push('denoise=1');if(t)qm.push('dual=1');return location.origin+'/stream.mjpg?res='+r+(qm.length?'&'+qm.join('&'):'')}var rs=['qqvga','qvga','vga'][r];if(fmt==1){var qj=[];if(d)qj.push('denoise=1');if(t)qj.push('dual=1');return location.origin+'/'+rs+'.jpg'+(qj.length?'?'+qj.join('&'):'')}var q=[];if(d)q.push('denoise=1');if(e)q.push('rgb565=1');return location.origin+'/'+rs+'.bmp'+(q.length?'?'+q.join('&'):'')}function upd(){var i;for(i=0;i<3;i++)g('r'+i).style.background=(fmt!=2&&r==i)?'#383':'';for(i=0;i<4;i++)g('f'+i).style.background=fmt==i?'#383':'';var db=g('db'),eb=g('eb'),dok=fmt!=2,eok=fmt==0;db.disabled=!dok;db.style.opacity=dok?1:.4;db.style.background=(dok&&d)?'#383':'#555';db.textContent='Denoise '+(d?'ON':'OFF');eb.disabled=!eok;eb.style.opacity=eok?1:.4;eb.style.background=(eok&&e)?'#383':'#555';eb.textContent='RGB565 '+(e?'ON':'OFF');var tb=g('tb'),tok=fmt==1||fmt==3;tb.disabled=!tok;tb.style.opacity=tok?1:.4;tb.style.background=(tok&&t)?'#383':'#555';tb.textContent='2-core '+(t?'ON':'OFF');g('c').style.display=fmt==3?'none':'';g('mj').style.display=fmt==3?'':'none';if(fmt==3){g('s').textContent='MJPEG '+['QQVGA','QVGA','VGA'][r]+(t?' x2':'')+(d?' +dn':'')+' (live)';var mu=url();if(mu!=mjsrc){mjsrc=mu;g('mj').src=mu}}else{mjsrc=''}g('u').value=url()}function C(){var u=g('u');u.focus();u.select();u.setSelectionRange(0,99999);try{document.execCommand('copy')}catch(z){}}function S(x){r=x;if(fmt==2)fmt=0;n=0;t0=0;upd()}function F(x){fmt=x;n=0;t0=0;upd()}function D(){if(fmt!=2){d=d?0:1;n=0;t0=0;upd()}}function E(){if(fmt==0){e=e?0:1;n=0;t0=0;upd()}}function T(){if(fmt==1){t=t?0:1;n=0;t0=0;upd()}}function L(){if(fmt==3){setTimeout(L,200);return}var im=new Image();im.onload=function(){var c=g('c');c.width=im.naturalWidth;c.height=im.naturalHeight;c.getContext('2d').drawImage(im,0,0);n++;var s=(fmt==2?'JPEGcam':['QQVGA','QVGA','VGA'][r]+(fmt==1?' JPEGsw':' BMP')+(d?' +dn':'')+(e&&fmt==0?' +565':'')+(t&&fmt==1?' x2':''))+'  frame '+n;if(n<2){t0=Date.now()}else{s+='  ('+((n-1)*1000/(Date.now()-t0)).toFixed(2)+' fps)'}g('s').textContent=s;setTimeout(L,40)};im.onerror=function(){setTimeout(L,800)};var u=url();im.src=u+(u.indexOf('?')<0?'?':'&')+'t='+Date.now()}upd();L()</script></body></html>";
 
 fn sysctl() -> *const pac::sysctl::RegisterBlock {
     pac::SYSCTL::ptr()
@@ -561,18 +561,15 @@ fn encode_dual(w: usize, h: usize, src: usize, out: &mut [u8]) -> Option<usize> 
     Some(p)
 }
 
-/// Encode CAP[0] (w x h RGB565) to JPEG into CAP[1] (free, 614 KB) and serve it as
-/// image/jpeg. `dual` runs the two-core split encoder. Returns (ok, jpeg_len, enc_ms).
-fn serve_swjpeg(w: usize, h: usize, src: usize, dual: bool, reply: &mut [u8]) -> (bool, usize, u64) {
+/// Encode CAP[src] (w x h RGB565) to JPEG into CAP[1] (614 KB). `dual` runs the two-core
+/// split encoder. Returns (jpeg_len, enc_ms); len 0 means encode failed/overflowed.
+fn encode_swjpeg(w: usize, h: usize, src: usize, dual: bool) -> (usize, u64) {
     let out = unsafe {
         core::slice::from_raw_parts_mut(cap_uncached(1) as *mut u8, MAXW * MAXH / 2 * 4)
     };
     let t_enc = mtime_ms();
     let len = if dual {
-        match encode_dual(w, h, src, out) {
-            Some(n) => n,
-            None => return (false, 0, 0),
-        }
+        encode_dual(w, h, src, out).unwrap_or(0)
     } else {
         // Copy the frame uncached(src) -> cached(2) once. The encoder reads each pixel ~2x
         // (luma + chroma); reading from the cached alias makes those hit L1 instead of
@@ -584,12 +581,101 @@ fn serve_swjpeg(w: usize, h: usize, src: usize, dual: bool, reply: &mut [u8]) ->
             let dst = core::slice::from_raw_parts_mut(cap_cached(2) as *mut u32, words);
             dst.copy_from_slice(s);
         }
-        match jpeg::encode(cap_cached(2) as *const u32, w, h, out) {
-            Some(n) => n,
-            None => return (false, 0, 0),
-        }
+        jpeg::encode(cap_cached(2) as *const u32, w, h, out).unwrap_or(0)
     };
-    let enc_ms = mtime_ms().wrapping_sub(t_enc);
+    (len, mtime_ms().wrapping_sub(t_enc))
+}
+
+/// The capture pipeline step: the buffer armed last call holds this frame (return it),
+/// then arm the next capture into the other ping-pong buffer so its DMA overlaps this
+/// frame's encode+send. Cold start / resolution change captures synchronously into CAP[0].
+fn pipelined_capture(dvp: &Dvp, pipe_arm: &mut i32, pipe_res: &mut usize, cur_res: usize) -> usize {
+    let src;
+    if *pipe_arm >= 0 && *pipe_res == cur_res {
+        dvp.capture_wait();
+        src = *pipe_arm as usize;
+    } else {
+        if *pipe_arm >= 0 {
+            dvp.capture_wait();
+        }
+        capture(dvp, 0);
+        src = 0;
+    }
+    let nxt = if src == 0 { 3 } else { 0 };
+    capture_arm(dvp, nxt);
+    *pipe_arm = nxt as i32;
+    *pipe_res = cur_res;
+    src
+}
+
+/// MJPEG: hold the connection open and push software-JPEG frames as a
+/// `multipart/x-mixed-replace` stream (one accept, no per-frame HTTP), so the browser's
+/// `<img>` updates live with no per-request overhead. Reuses the capture pipeline + the
+/// two-core encoder. Loops until a send fails (client navigated away / changed params).
+/// Returns the number of frames streamed.
+fn serve_mjpeg(
+    dvp: &Dvp,
+    w: usize,
+    h: usize,
+    cur_res: usize,
+    dual: bool,
+    denoise: bool,
+    pipe_arm: &mut i32,
+    pipe_res: &mut usize,
+    reply: &mut [u8],
+) -> u32 {
+    let pre = b"HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=f\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
+    if !send_all(uart_wifi::CMD_SEND, pre, reply) {
+        return 0;
+    }
+    let mut frames = 0u32;
+    loop {
+        let src = if denoise {
+            if *pipe_arm >= 0 {
+                dvp.capture_wait();
+                *pipe_arm = -1;
+            }
+            capture(dvp, 0);
+            capture(dvp, 1);
+            capture(dvp, 2);
+            denoise_median(w, h);
+            destripe(w, h);
+            0
+        } else {
+            pipelined_capture(dvp, pipe_arm, pipe_res, cur_res)
+        };
+        let (len, _enc) = encode_swjpeg(w, h, src, dual);
+        if len == 0 {
+            break;
+        }
+        let mut hdr = [0u8; 80];
+        let mut n = 0;
+        n += append(&mut hdr, n, b"--f\r\nContent-Type: image/jpeg\r\nContent-Length: ");
+        n += write_dec(&mut hdr[n..], len as u32);
+        n += append(&mut hdr, n, b"\r\n\r\n");
+        if !send_all(uart_wifi::CMD_SEND, &hdr[..n], reply) {
+            break;
+        }
+        let out = unsafe { core::slice::from_raw_parts(cap_uncached(1) as *const u8, len) };
+        if !send_all(uart_wifi::CMD_SEND, out, reply) {
+            break;
+        }
+        if !send_all(uart_wifi::CMD_SEND, b"\r\n", reply) {
+            break;
+        }
+        frames += 1;
+    }
+    frames
+}
+
+/// Encode CAP[src] and serve it as a standalone `image/jpeg` response (one snapshot).
+/// Returns (ok, jpeg_len, enc_ms).
+fn serve_swjpeg(w: usize, h: usize, src: usize, dual: bool, reply: &mut [u8]) -> (bool, usize, u64) {
+    let (len, enc_ms) = encode_swjpeg(w, h, src, dual);
+    if len == 0 {
+        return (false, 0, enc_ms);
+    }
+    let out = unsafe { core::slice::from_raw_parts(cap_uncached(1) as *const u8, len) };
     let mut hdr = [0u8; 96];
     let mut n = 0;
     n += append(&mut hdr, n, b"HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: ");
@@ -598,7 +684,7 @@ fn serve_swjpeg(w: usize, h: usize, src: usize, dual: bool, reply: &mut [u8]) ->
     if !send_all(uart_wifi::CMD_SEND, &hdr[..n], reply) {
         return (false, len, enc_ms);
     }
-    let ok = send_all(uart_wifi::CMD_SEND, &out[..len], reply);
+    let ok = send_all(uart_wifi::CMD_SEND, out, reply);
     (ok, len, enc_ms)
 }
 
@@ -903,10 +989,12 @@ fn main() -> ! {
         //   ?rgb565=1   send RGB565, expand on the ESP32 (BMP only)
         //   ?dual=1     two-core parallel encode (software JPEG only)
         // Query fallbacks for the path: ?res=0|1|2 (resolution), ?hwjpeg=1 (camera HW JPEG).
+        // /stream.mjpg = held-open MJPEG (multipart) software-JPEG stream.
         let rs = &req[..rl];
         // /cam.jpg = camera HARDWARE JPEG; /{res}.jpg = SOFTWARE JPEG; /{res}.bmp = BMP.
-        let is_camjpg = contains(rs, b"cam.jpg") || flag(rs, b"hwjpeg=") == 1;
-        let is_swjpg = !is_camjpg && contains(rs, b".jpg");
+        let is_stream = contains(rs, b".mjpg");
+        let is_camjpg = !is_stream && (contains(rs, b"cam.jpg") || flag(rs, b"hwjpeg=") == 1);
+        let is_swjpg = !is_camjpg && !is_stream && contains(rs, b".jpg");
         let is_bmp = contains(rs, b".bmp");
 
         if is_camjpg {
@@ -930,6 +1018,50 @@ fn main() -> ! {
             puts(b"B ");
             put_dec(ms as u32);
             puts(b"ms\n");
+        } else if is_stream {
+            // ---- MJPEG software-JPEG stream (/stream.mjpg) — held-open multipart ----
+            if cur_jpeg {
+                if pipe_arm >= 0 {
+                    dvp.capture_wait();
+                    pipe_arm = -1;
+                }
+                let (nw, nh) = configure_res(&dvp, cur_res); // back to RGB output
+                w = nw;
+                h = nh;
+                cur_jpeg = false;
+            }
+            let r = if contains(rs, b"qqvga") {
+                0
+            } else if contains(rs, b"qvga") {
+                1
+            } else if contains(rs, b"vga") {
+                2
+            } else {
+                parse_digit(rs, b"res=", cur_res, 2)
+            };
+            let d = flag(rs, b"denoise=");
+            let two = flag(rs, b"dual=");
+            if r != cur_res {
+                if pipe_arm >= 0 {
+                    dvp.capture_wait();
+                    pipe_arm = -1;
+                }
+                let (nw, nh) = configure_res(&dvp, r);
+                w = nw;
+                h = nh;
+                cur_res = r;
+            }
+            puts(b"MJPEG r");
+            put_dec(cur_res as u32);
+            puts(if two == 1 { b" x2" } else { b" x1" });
+            puts(if d == 1 { b" dn" } else { b" -" });
+            puts(b" start\n");
+            let nframes = serve_mjpeg(
+                &dvp, w, h, cur_res, two == 1, d == 1, &mut pipe_arm, &mut pipe_res, &mut reply,
+            );
+            puts(b"MJPEG end ");
+            put_dec(nframes);
+            puts(b" frames\n");
         } else if is_swjpg || is_bmp {
             if cur_jpeg {
                 if pipe_arm >= 0 {
@@ -982,23 +1114,7 @@ fn main() -> ! {
                 destripe(w, h);
                 src = 0;
             } else if is_swjpg {
-                // pipeline: the buffer armed last iteration holds this frame.
-                if pipe_arm >= 0 && pipe_res == cur_res {
-                    dvp.capture_wait();
-                    src = pipe_arm as usize;
-                } else {
-                    if pipe_arm >= 0 {
-                        dvp.capture_wait();
-                    }
-                    capture(&dvp, 0);
-                    src = 0;
-                }
-                // arm the next capture into the other ping-pong buffer so its DMA runs
-                // during this frame's encode+send.
-                let nxt = if src == 0 { 3 } else { 0 };
-                capture_arm(&dvp, nxt);
-                pipe_arm = nxt as i32;
-                pipe_res = cur_res;
+                src = pipelined_capture(&dvp, &mut pipe_arm, &mut pipe_res, cur_res);
             } else {
                 // BMP: synchronous, no pipeline.
                 if pipe_arm >= 0 {
@@ -1050,7 +1166,7 @@ fn main() -> ! {
                 puts(b"ms\n");
             }
         } else {
-            let mut resp = [0u8; 4096];
+            let mut resp = [0u8; 5120];
             let mut hn = 0;
             hn += append(&mut resp, hn, b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ");
             hn += write_dec(&mut resp[hn..], HTML.len() as u32);

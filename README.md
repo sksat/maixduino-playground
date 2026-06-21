@@ -100,6 +100,13 @@
   `?denoise=1`・`?rgb565=1`(RGB565直送)・`?dual=1`(2コア)。ページに**現モードの直 URL を表示＋Copy ボタン**（http なので
   `execCommand('copy')` フォールバック）。その URL を curl すれば同じモードのフレームを撮り続けられる（モードはリクエスト毎に
   パス/クエリから判定。解像度は substring 順 qqvga→qvga→vga で判定、`?res=`/`?hwjpeg=` もフォールバックで生存）。
+  **MJPEG ストリームモード**（`/stream.mjpg?res=N&dual=1&denoise=1`、ページに MJPEG ボタン）: 1フレーム毎に新しい HTTP GET
+  ではなく、**コネクションを張りっぱなしにして `multipart/x-mixed-replace` でフレームを連送**（本物の IP カメラと同じ形式、
+  ブラウザは `<img>` にそのまま表示）。accept once → multipart 前文 → ループで `--f\r\nContent-Type: image/jpeg\r\n…\r\n\r\n`
+  ＋JPEG を送り続け、send 失敗（クライアント切断）で抜けて accept に戻る。キャプチャパイプライン＋2コアエンコードをそのまま
+  流用。**ただし速くはならない**: 実測 VGA 2.5fps・QVGA 5.7fps で、どちらも **~100KB/s の WiFi(ESP32) スループット律速**
+  （polling も同じ天井に当たる＝ボトルネックは per-request オーバーヘッドではなく WiFi だった）。価値は「滑らかな連続 push＋
+  標準形式＋K210 の per-request 処理が消える」こと。モード切替時はブラウザが `<img>` の src を貼り替えて再接続。
   **効いた一手＝WiFi を SPI0 から UART に逃がした**こと。旧版の遅さは「カメラ(DVP)と WiFi(nina) が両方 SPI0 を
   使い、撮影が ESP32 のネットを壊す→撮影ごとに EN リセット＋再接続(~5s)」が原因だった。**ESP32 を UART
   modem 化**すれば WiFi はカメラと無関係な IO6/IO7 を通るので、撮影がネットを壊さない＝復旧ダンスが丸ごと消え、
